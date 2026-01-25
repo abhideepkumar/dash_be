@@ -1,6 +1,7 @@
 import express from 'express';
 import { getPool } from '../config/db.js';
 import { processUserQuery } from '../services/queryProcessor.js';
+import { generateUISpec } from '../services/uiGenerator.js';
 
 const router = express.Router();
 
@@ -100,4 +101,51 @@ router.post('/execute', async (req, res) => {
   }
 });
 
+/**
+ * POST /api/query/visualize
+ * Generate UI specification from query results using LLM
+ */
+router.post('/visualize', async (req, res) => {
+  try {
+    const { originalQuery, sql, rows, fields } = req.body;
+
+    if (!originalQuery) {
+      return res.status(400).json({
+        success: false,
+        message: 'Missing originalQuery.',
+      });
+    }
+
+    if (!rows || !Array.isArray(rows)) {
+      return res.status(400).json({
+        success: false,
+        message: 'Missing or invalid rows data.',
+      });
+    }
+
+    if (!fields || !Array.isArray(fields)) {
+      return res.status(400).json({
+        success: false,
+        message: 'Missing or invalid fields data.',
+      });
+    }
+
+    console.log(`[QUERY ROUTE] Generating UI for: "${originalQuery}" (${rows.length} rows)`);
+
+    const uiSpec = await generateUISpec({ originalQuery, sql, rows, fields });
+
+    return res.json({
+      success: true,
+      uiSpec,
+    });
+  } catch (error) {
+    console.error('[QUERY ROUTE] UI Generation Error:', error.message);
+    return res.status(500).json({
+      success: false,
+      message: 'UI generation failed: ' + error.message,
+    });
+  }
+});
+
 export default router;
+

@@ -1,0 +1,58 @@
+[
+  {
+    "component": "Card",
+    "description": "A container for a single key metric or a grouped set of related information.",
+    "use_when": "Displaying a single important numeric value (KPI), a summary, or a small group of related details.",
+    "expects": {
+      "title": "string (required) - The label of the metric",
+      "value": "string/number (required) - The main value to display",
+      "description": "string (optional) - Additional context or sub-text",
+      "trend": "number (optional) - Percentage change or difference",
+      "icon": "string (optional) - Name of a Lucide icon to display"
+    }
+  },
+  {
+    "component": "Table",
+    "description": "A responsive data grid for displaying lists of records.",
+    "use_when": "Displaying a list of records with multiple attributes, search results, or detailed logs.",
+    "expects": {
+      "columns": "array of objects (required) - Definitions for each column {Header: string, accessor: string}",
+      "data": "array of objects (required) - The actual data records matching the column accessors",
+      "caption": "string (optional) - A specific caption for the table"
+    }
+  },
+  {
+    "component": "Progress",
+    "description": "A linear progress bar indicator.",
+    "use_when": "Visualizing a percentage, completion rate, or a value within a fixed range (0-100).",
+    "expects": {
+      "value": "number (required) - Current value between 0 and 100",
+      "label": "string (optional) - Label describing what is being measured"
+    }
+  },
+  {
+    "component": "Badge",
+    "description": "A small chip to display status, category, or count.",
+    "use_when": "Highlighting a status (Active/Inactive), a category tag, or a short labeled attribute.",
+    "expects": {
+      "label": "string (required) - The text to display",
+      "variant": "string (optional) - One of 'default', 'secondary', 'destructive', 'outline'"
+    }
+  },
+  {
+    "component": "Separator",
+    "description": "A visual divider.",
+    "use_when": "Separating distinct sections or groups of content within a layout.",
+    "expects": {
+      "orientation": "string (optional) - 'horizontal' (default) or 'vertical'"
+    }
+  },
+  {
+    "component": "Skeleton",
+    "description": "A placeholder loading state.",
+    "use_when": "Data is fetching or processing to minimize layout shift.",
+    "expects": {
+      "className": "string (optional) - CSS classes for width and height (e.g., 'h-4 w-[250px]')"
+    }
+  }
+]

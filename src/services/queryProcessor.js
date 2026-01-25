@@ -120,8 +120,9 @@ SQL Query:`;
 export async function processUserQuery(query, sessionId, topK = 5) {
   console.log(`[QUERY] Processing query: "${query}" for session: ${sessionId}`);
 
-  // Step 1: Enhance the query
-  const enhancedQuery = await enhanceQuery(query);
+  // Step 1: Enhance the query (DISABLED for testing - using raw query instead)
+  // const enhancedQuery = await enhanceQuery(query);
+  const enhancedQuery = query; // Use raw query directly
 
   // Step 2: Search for relevant tables using vector store
   const relevantTables = await searchRelevantTables(enhancedQuery, sessionId, topK);
