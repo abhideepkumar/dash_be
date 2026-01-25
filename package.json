@@ -1,0 +1,24 @@
+{
+  "name": "dashboard-be",
+  "version": "1.0.0",
+  "description": "Backend for AI Data -> UI Generator",
+  "main": "src/index.js",
+  "type": "module",
+  "scripts": {
+    "dev": "node src/index.js",
+    "start": "node src/index.js"
+  },
+  "dependencies": {
+    "@google/genai": "^1.38.0",
+    "@google/generative-ai": "^0.21.0",
+    "@pinecone-database/pinecone": "^4.0.0",
+    "cors": "^2.8.5",
+    "dotenv": "^16.4.7",
+    "express": "^4.21.2",
+    "openai": "^6.16.0",
+    "pg": "^8.13.1"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC"
+}
