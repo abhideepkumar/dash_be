@@ -2,6 +2,7 @@ import OpenAI from "openai";
 import { readFileSync } from 'fs';
 import { fileURLToPath } from 'url';
 import { dirname, join } from 'path';
+import { generateInsights } from './insightGenerator.js';
 
 // Get current directory for loading component metadata
 const __filename = fileURLToPath(import.meta.url);
@@ -18,13 +19,13 @@ const groqClient = new OpenAI({
 });
 
 /**
- * Analyze query result data and generate a UI specification
+ * Analyze query result data and generate a UI specification with insights
  * @param {object} params - Parameters for UI generation
  * @param {string} params.originalQuery - The original natural language query
  * @param {string} params.sql - The executed SQL query
  * @param {Array} params.rows - The query result rows
  * @param {Array} params.fields - The query result field definitions
- * @returns {Promise<object>} UI specification JSON
+ * @returns {Promise<object>} UI specification JSON with insights
  */
 export async function generateUISpec({ originalQuery, sql, rows, fields }) {
   // Prepare data summary for the LLM
@@ -106,14 +107,18 @@ For Table:
 JSON Output:`;
 
   try {
-    const response = await groqClient.chat.completions.create({
-      model: "llama-3.3-70b-versatile",
-      messages: [{ role: "user", content: prompt }],
-      temperature: 0.1, // Low temperature for consistent output
-      max_tokens: 2000,
-    });
+    // Generate UI spec and insights in parallel for better performance
+    const [uiResponse, insights] = await Promise.all([
+      groqClient.chat.completions.create({
+        model: "llama-3.3-70b-versatile",
+        messages: [{ role: "user", content: prompt }],
+        temperature: 0.1,
+        max_tokens: 2000,
+      }),
+      generateInsights({ originalQuery, rows, fields, chartType: null })
+    ]);
 
-    let content = response.choices[0].message.content.trim();
+    let content = uiResponse.choices[0].message.content.trim();
     
     // Clean up any markdown code blocks if present
     if (content.startsWith('```json')) {
@@ -154,7 +159,10 @@ JSON Output:`;
       }
     }
 
-    console.log(`[UI GENERATOR] Selected component: ${uiSpec.component.type} for query: "${originalQuery}"`);
+    // Add insights to the response
+    uiSpec.insights = insights;
+
+    console.log(`[UI GENERATOR] Selected component: ${uiSpec.component.type} with ${insights.length} insights for query: "${originalQuery}"`);
     
     return uiSpec;
   } catch (error) {
@@ -178,7 +186,8 @@ JSON Output:`;
               dataKey: numericFields[0].name,
               data: rows,
             }
-          }
+          },
+          insights: []
         };
       }
       
@@ -193,10 +202,12 @@ JSON Output:`;
             columns: fields.map(f => ({ Header: f.name, accessor: f.name })),
             data: rows,
           }
-        }
+        },
+        insights: []
       };
     }
     
     throw new Error('Failed to generate UI specification: ' + error.message);
   }
 }
+
