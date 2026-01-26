@@ -19,6 +19,10 @@ const userSchema = new mongoose.Schema({
   },
   lastLoginAt: {
     type: Date
+  },
+  isReady: {
+    type: Boolean,
+    default: false
   }
 });
 

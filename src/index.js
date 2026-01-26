@@ -8,6 +8,7 @@ import schemaRoutes from './routes/schema.routes.js';
 import queryRoutes from './routes/query.routes.js';
 import authRoutes from './routes/auth.routes.js';
 import userRoutes from './routes/user.routes.js';
+import logsRoutes from './routes/logs.routes.js';
 
 const app = express();
 const PORT = 8000;
@@ -39,6 +40,7 @@ app.use('/api/auth', authRoutes);
 app.use('/api/user', userRoutes);
 app.use('/api/schema', schemaRoutes);
 app.use('/api/query', queryRoutes);
+app.use('/api/logs', logsRoutes);
 
 // Error handling middleware
 app.use((err, req, res, next) => {

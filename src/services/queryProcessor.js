@@ -147,26 +147,57 @@ SQL Query:`;
  * @param {string} query - Original user query
  * @param {string} sessionId - Session ID for namespace isolation in vector store
  * @param {number} topK - Number of relevant tables to retrieve (default: 5)
+ * @param {function} onStep - Optional callback for logging steps: (stepName, input, output, durationMs, error?) => void
  * @returns {Promise<Object>} Result containing enhancedQuery, relevantTables, and sql
  */
-export async function processUserQuery(query, sessionId, topK = 5) {
+export async function processUserQuery(query, sessionId, topK = 5, onStep = null) {
   console.log(`[QUERY] Processing query: "${query}" for session: ${sessionId}`);
 
   // Step 1: Enhance the query (DISABLED for testing - using raw query instead)
-  // const enhancedQuery = await enhanceQuery(query);
-  const enhancedQuery = query; // Use raw query directly
+  let enhancedQuery = query;
+  let stepStart = Date.now();
+  
+  // Uncomment to enable query enhancement:
+  // try {
+  //   enhancedQuery = await enhanceQuery(query);
+  //   if (onStep) onStep('enhance', { query }, { enhancedQuery }, Date.now() - stepStart);
+  // } catch (err) {
+  //   if (onStep) onStep('enhance', { query }, null, Date.now() - stepStart, err.message);
+  // }
 
   // Step 2: Search for relevant tables using vector store
-  let relevantTables = await searchRelevantTables(enhancedQuery, sessionId, topK);
-  
-  if (relevantTables.length === 0) {
-    throw new Error('No relevant tables found. Please ensure the database schema has been extracted.');
+  stepStart = Date.now();
+  let relevantTables;
+  try {
+    relevantTables = await searchRelevantTables(enhancedQuery, sessionId, topK);
+    
+    if (relevantTables.length === 0) {
+      const error = 'No relevant tables found. Please ensure the database schema has been extracted.';
+      if (onStep) onStep('vector_search', { query: enhancedQuery, sessionId, topK }, null, Date.now() - stepStart, error);
+      throw new Error(error);
+    }
+    
+    if (onStep) {
+      onStep('vector_search', 
+        { query: enhancedQuery, sessionId, topK }, 
+        { tablesFound: relevantTables.length, tables: relevantTables.map(t => ({ table: t.table, score: t.score })) },
+        Date.now() - stepStart
+      );
+    }
+  } catch (err) {
+    if (onStep && !err.message.includes('No relevant tables')) {
+      onStep('vector_search', { query: enhancedQuery, sessionId, topK }, null, Date.now() - stepStart, err.message);
+    }
+    throw err;
   }
 
   console.log(`[QUERY] Vector search found ${relevantTables.length} tables: ${relevantTables.map(t => t.table).join(', ')}`);
 
-  // Step 2.5: Expand with graph - find bridge tables (NEW)
+  // Step 2.5: Expand with graph - find bridge tables
+  stepStart = Date.now();
   const serializedGraph = getSessionGraph(sessionId);
+  const originalTableCount = relevantTables.length;
+  
   if (serializedGraph) {
     const graph = deserializeGraph(serializedGraph);
     if (graph) {
@@ -179,9 +210,36 @@ export async function processUserQuery(query, sessionId, topK = 5) {
   } else {
     console.log(`[QUERY] No schema graph found for session, skipping graph expansion`);
   }
+  
+  if (onStep) {
+    onStep('graph_expand',
+      { originalTables: originalTableCount, hasGraph: !!serializedGraph },
+      { 
+        expandedTables: relevantTables.length,
+        addedTables: relevantTables.length - originalTableCount,
+        allTables: relevantTables.map(t => ({ table: t.table, is_bridge: t.is_bridge || false }))
+      },
+      Date.now() - stepStart
+    );
+  }
 
   // Step 3: Generate SQL using the enhanced query and schemas
-  const sql = await generateSQL(enhancedQuery, relevantTables);
+  stepStart = Date.now();
+  let sql;
+  try {
+    sql = await generateSQL(enhancedQuery, relevantTables);
+    
+    if (onStep) {
+      onStep('sql_generate',
+        { query: enhancedQuery, tableCount: relevantTables.length },
+        { sql, sqlLength: sql.length },
+        Date.now() - stepStart
+      );
+    }
+  } catch (err) {
+    if (onStep) onStep('sql_generate', { query: enhancedQuery, tableCount: relevantTables.length }, null, Date.now() - stepStart, err.message);
+    throw err;
+  }
 
   return {
     originalQuery: query,
@@ -195,4 +253,5 @@ export async function processUserQuery(query, sessionId, topK = 5) {
     sql,
   };
 }
+
 

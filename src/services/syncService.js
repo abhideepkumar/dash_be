@@ -4,6 +4,7 @@
  * Runs schema extraction in the background without blocking API responses.
  */
 
+import User from '../models/User.js';
 import DbConfig from '../models/DbConfig.js';
 import { createPool, closePool } from '../config/db.js';
 import { getFullSchema } from './schemaExtractor.js';
@@ -43,6 +44,9 @@ async function runSyncProcess(userId, configId) {
       syncStatus: 'syncing',
       syncError: null 
     });
+
+    // Mark user as not ready
+    await User.findByIdAndUpdate(userId, { isReady: false });
     
     console.log(`[SYNC] Starting sync for session: ${sessionId}`);
     
@@ -89,6 +93,7 @@ async function runSyncProcess(userId, configId) {
     await upsertAllMetadata(enrichedSchemas, sessionId);
     
     // Update config with success
+    // Update config with success
     await DbConfig.findByIdAndUpdate(configId, {
       syncStatus: 'completed',
       lastSyncedAt: new Date(),
@@ -96,6 +101,9 @@ async function runSyncProcess(userId, configId) {
       schemaGraph: serializedGraph,
       syncError: null
     });
+    
+    // Mark user as ready
+    await User.findByIdAndUpdate(userId, { isReady: true });
     
     console.log(`[SYNC] ✅ Sync completed for session: ${sessionId} (${rawSchemas.length} tables)`);
     
