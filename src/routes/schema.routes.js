@@ -9,6 +9,8 @@ import {
   getStoredTables,
   clearNamespace 
 } from '../services/vectorStore.js';
+import { buildSchemaGraph, serializeGraph, getGraphStats } from '../services/schemaGraph.js';
+import { setSessionGraph } from '../services/queryProcessor.js';
 
 const router = express.Router();
 
@@ -123,6 +125,22 @@ router.post('/extract', async (req, res) => {
         });
         
         console.log(`[EXTRACT] Stage 2 complete: Enriched ${enrichedSchemas.length} tables`);
+
+        // Stage 2.5: Build Schema Graph (NEW)
+        console.log('[EXTRACT] Stage 2.5: Building schema graph for bridge detection...');
+        const schemaGraph = buildSchemaGraph(rawSchemas);
+        const graphStats = getGraphStats(schemaGraph);
+        console.log(`[EXTRACT] Graph stats: ${graphStats.nodeCount} nodes, ${graphStats.edgeCount} edges`);
+        if (graphStats.topConnected.length > 0) {
+          console.log(`[EXTRACT] Top connected tables: ${graphStats.topConnected.slice(0, 3).map(t => `${t.table}(${t.connections})`).join(', ')}`);
+        }
+        
+        // Store serialized graph in progress
+        const serializedGraph = serializeGraph(schemaGraph);
+        extractionProgress.get(sessionId).graph = serializedGraph;
+        
+        // Also store in queryProcessor for graph expansion during queries
+        setSessionGraph(sessionId, serializedGraph);
 
         // Stage 3: Store in Pinecone
         console.log('[EXTRACT] Stage 3: Storing in Pinecone...');

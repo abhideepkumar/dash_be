@@ -13,7 +13,7 @@ const componentMetadata = JSON.parse(readFileSync(componentMetadataPath, 'utf-8'
 
 // Groq client
 const groqClient = new OpenAI({
-  apiKey: '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',
+  apiKey: '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',
   baseURL: "https://api.groq.com/openai/v1",
 });
 

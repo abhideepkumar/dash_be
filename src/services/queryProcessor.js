@@ -1,11 +1,30 @@
 import OpenAI from "openai";
 import { searchRelevantTables } from './vectorStore.js';
+import { deserializeGraph, expandWithGraph } from './schemaGraph.js';
 
 // Groq client (hardcoded API key as per earlier request)
 const groqClient = new OpenAI({
-  apiKey: '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',
+  apiKey: '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',
   baseURL: "https://api.groq.com/openai/v1",
 });
+
+// Session graph storage (populated from schema extraction)
+const sessionGraphs = new Map();
+
+/**
+ * Store schema graph for a session (called from schema.routes.js)
+ */
+export function setSessionGraph(sessionId, serializedGraph) {
+  sessionGraphs.set(sessionId, serializedGraph);
+  console.log(`[QUERY] Stored schema graph for session: ${sessionId}`);
+}
+
+/**
+ * Get schema graph for a session
+ */
+export function getSessionGraph(sessionId) {
+  return sessionGraphs.get(sessionId);
+}
 
 /**
  * Enhance a user query to make it clearer and more suitable for vector search and SQL generation
@@ -64,7 +83,11 @@ export async function generateSQL(query, tables) {
     const fks = t.foreign_keys && t.foreign_keys.length > 0 
       ? `  Foreign Keys: ${t.foreign_keys.join(', ')}`
       : '';
-    return `TABLE: ${t.table}
+    
+    // Mark bridge tables for LLM awareness
+    const bridgeNote = t.is_bridge ? ' [BRIDGE TABLE - connects other tables]' : '';
+    
+    return `TABLE: ${t.table}${bridgeNote}
   Description: ${t.description}
   Columns:
 ${cols}
@@ -84,7 +107,8 @@ Rules:
 3. Include necessary WHERE clauses based on the query
 4. Use meaningful aliases for tables
 5. For columns with [VALID VALUES: ...], ONLY use those exact values in WHERE clauses
-6. Return ONLY the SQL query, no explanation, no markdown code blocks
+6. Tables marked [BRIDGE TABLE] are junction tables - use them to connect other tables
+7. Return ONLY the SQL query, no explanation, no markdown code blocks
 
 SQL Query:`;
 
@@ -133,13 +157,28 @@ export async function processUserQuery(query, sessionId, topK = 5) {
   const enhancedQuery = query; // Use raw query directly
 
   // Step 2: Search for relevant tables using vector store
-  const relevantTables = await searchRelevantTables(enhancedQuery, sessionId, topK);
+  let relevantTables = await searchRelevantTables(enhancedQuery, sessionId, topK);
   
   if (relevantTables.length === 0) {
     throw new Error('No relevant tables found. Please ensure the database schema has been extracted.');
   }
 
-  console.log(`[QUERY] Found ${relevantTables.length} relevant tables: ${relevantTables.map(t => t.table).join(', ')}`);
+  console.log(`[QUERY] Vector search found ${relevantTables.length} tables: ${relevantTables.map(t => t.table).join(', ')}`);
+
+  // Step 2.5: Expand with graph - find bridge tables (NEW)
+  const serializedGraph = getSessionGraph(sessionId);
+  if (serializedGraph) {
+    const graph = deserializeGraph(serializedGraph);
+    if (graph) {
+      const expandedTables = expandWithGraph(graph, relevantTables, 2, 3);
+      if (expandedTables.length > relevantTables.length) {
+        console.log(`[QUERY] Graph expansion added ${expandedTables.length - relevantTables.length} bridge/neighbor tables`);
+        relevantTables = expandedTables;
+      }
+    }
+  } else {
+    console.log(`[QUERY] No schema graph found for session, skipping graph expansion`);
+  }
 
   // Step 3: Generate SQL using the enhanced query and schemas
   const sql = await generateSQL(enhancedQuery, relevantTables);
@@ -151,7 +190,9 @@ export async function processUserQuery(query, sessionId, topK = 5) {
       table: t.table,
       description: t.description,
       score: t.score,
+      is_bridge: t.is_bridge || false,
     })),
     sql,
   };
 }
+
