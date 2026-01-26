@@ -1,58 +1,95 @@
 [
   {
     "component": "Card",
-    "description": "A container for a single key metric or a grouped set of related information.",
-    "use_when": "Displaying a single important numeric value (KPI), a summary, or a small group of related details.",
+    "description": "A container for a single key metric or KPI.",
+    "use_when": "Displaying a single aggregate value like COUNT, SUM, AVG, or a single row with 1-2 columns.",
+    "priority": 1,
     "expects": {
       "title": "string (required) - The label of the metric",
       "value": "string/number (required) - The main value to display",
-      "description": "string (optional) - Additional context or sub-text",
-      "trend": "number (optional) - Percentage change or difference",
-      "icon": "string (optional) - Name of a Lucide icon to display"
+      "description": "string (optional) - Additional context",
+      "trend": "number (optional) - Percentage change"
+    }
+  },
+  {
+    "component": "BarChart",
+    "description": "A vertical bar chart for comparing values across categories.",
+    "use_when": "Comparing discrete categories (e.g., sales by product, users by country). Best when you have 1 label column + 1 or more numeric columns.",
+    "priority": 2,
+    "expects": {
+      "categoryKey": "string (required) - Column name for category labels (x-axis)",
+      "dataKey": "string or array (required) - Column name(s) for bar values (numeric)"
+    }
+  },
+  {
+    "component": "LineChart",
+    "description": "A line chart showing trends over a continuous dimension.",
+    "use_when": "Showing trends over time or sequences. Best when x-axis is temporal (date, month, year) and you have 1+ numeric value columns.",
+    "priority": 2,
+    "expects": {
+      "categoryKey": "string (required) - Column name for x-axis (usually date/time)",
+      "dataKey": "string or array (required) - Column name(s) for line values"
+    }
+  },
+  {
+    "component": "AreaChart",
+    "description": "A filled area chart emphasizing volume and magnitude over time.",
+    "use_when": "Showing cumulative totals or emphasizing the magnitude of trends. Similar to LineChart but with filled areas.",
+    "priority": 2,
+    "expects": {
+      "categoryKey": "string (required) - Column name for x-axis",
+      "dataKey": "string or array (required) - Column name(s) for area values"
+    }
+  },
+  {
+    "component": "PieChart",
+    "description": "A circular chart showing proportions of a whole.",
+    "use_when": "Showing how parts relate to a whole. Best for 2-8 categories. Use when the question asks about 'distribution', 'share', or 'breakdown'.",
+    "priority": 2,
+    "expects": {
+      "nameKey": "string (required) - Column name for slice labels",
+      "dataKey": "string (required) - Column name for slice values (numeric)"
+    }
+  },
+  {
+    "component": "RadialChart",
+    "description": "A circular gauge for showing progress or single metrics as percentages.",
+    "use_when": "Displaying goal completion, percentages, or comparing 1-5 metrics. Best when values are between 0-100.",
+    "priority": 2,
+    "expects": {
+      "nameKey": "string (required) - Column name for metric labels",
+      "dataKey": "string (required) - Column name for metric values",
+      "maxValue": "number (optional) - Maximum value for scale (default: 100)"
     }
   },
   {
     "component": "Table",
-    "description": "A responsive data grid for displaying lists of records.",
-    "use_when": "Displaying a list of records with multiple attributes, search results, or detailed logs.",
+    "description": "A data grid for detailed listings when charts are not appropriate.",
+    "use_when": "ONLY use when data has many heterogeneous columns that don't form a clear pattern for charts, or when user explicitly asks for a 'list' or 'details'.",
+    "priority": 3,
     "expects": {
-      "columns": "array of objects (required) - Definitions for each column {Header: string, accessor: string}",
-      "data": "array of objects (required) - The actual data records matching the column accessors",
-      "caption": "string (optional) - A specific caption for the table"
+      "columns": "array of {Header, accessor} - Auto-generated from fields",
+      "caption": "string (optional) - Table description"
     }
   },
   {
     "component": "Progress",
-    "description": "A linear progress bar indicator.",
-    "use_when": "Visualizing a percentage, completion rate, or a value within a fixed range (0-100).",
+    "description": "A linear progress bar for single percentage values.",
+    "use_when": "Visualizing a single percentage or completion rate (0-100).",
+    "priority": 1,
     "expects": {
-      "value": "number (required) - Current value between 0 and 100",
-      "label": "string (optional) - Label describing what is being measured"
+      "value": "number (required) - Value between 0 and 100",
+      "label": "string (optional) - Label"
     }
   },
   {
     "component": "Badge",
-    "description": "A small chip to display status, category, or count.",
-    "use_when": "Highlighting a status (Active/Inactive), a category tag, or a short labeled attribute.",
+    "description": "A small chip for status or category display.",
+    "use_when": "Highlighting a status (Active/Inactive), category, or short text value from a single-row, single-column result.",
+    "priority": 1,
     "expects": {
       "label": "string (required) - The text to display",
-      "variant": "string (optional) - One of 'default', 'secondary', 'destructive', 'outline'"
-    }
-  },
-  {
-    "component": "Separator",
-    "description": "A visual divider.",
-    "use_when": "Separating distinct sections or groups of content within a layout.",
-    "expects": {
-      "orientation": "string (optional) - 'horizontal' (default) or 'vertical'"
-    }
-  },
-  {
-    "component": "Skeleton",
-    "description": "A placeholder loading state.",
-    "use_when": "Data is fetching or processing to minimize layout shift.",
-    "expects": {
-      "className": "string (optional) - CSS classes for width and height (e.g., 'h-4 w-[250px]')"
+      "variant": "string (optional) - 'default', 'secondary', 'destructive', 'outline'"
     }
   }
 ]

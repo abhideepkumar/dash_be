@@ -51,9 +51,16 @@ Enhanced query:`;
  * @returns {Promise<string>} Generated SQL query
  */
 export async function generateSQL(query, tables) {
-  // Format table schemas for the prompt
+  // Format table schemas for the prompt with enum values
   const schemaText = tables.map(t => {
-    const cols = t.columns.map(c => `    ${c.name} (${c.type}): ${c.meaning || c.name}`).join('\n');
+    const cols = t.columns.map(c => {
+      let colDesc = `    ${c.name} (${c.type}): ${c.meaning || c.name}`;
+      // Include enum values if present (CRITICAL for correct SQL generation)
+      if (c.is_enum && c.enum_values && c.enum_values.length > 0) {
+        colDesc += ` [VALID VALUES: ${c.enum_values.join(', ')}]`;
+      }
+      return colDesc;
+    }).join('\n');
     const fks = t.foreign_keys && t.foreign_keys.length > 0 
       ? `  Foreign Keys: ${t.foreign_keys.join(', ')}`
       : '';
@@ -76,7 +83,8 @@ Rules:
 2. Use appropriate JOINs based on foreign key relationships
 3. Include necessary WHERE clauses based on the query
 4. Use meaningful aliases for tables
-5. Return ONLY the SQL query, no explanation, no markdown code blocks
+5. For columns with [VALID VALUES: ...], ONLY use those exact values in WHERE clauses
+6. Return ONLY the SQL query, no explanation, no markdown code blocks
 
 SQL Query:`;
 

@@ -22,10 +22,108 @@ export async function getAllTables(sessionId) {
 }
 
 /**
+ * Extract enum-like columns using PostgreSQL statistics (pg_stats)
+ * This identifies columns with low cardinality (≤20 distinct values)
+ * and extracts their most common values - all in a SINGLE query
+ * 
+ * @param {Object} pool - Database pool
+ * @returns {Promise<Object>} Map of table -> column -> {distinct_count, values}
+ */
+async function extractEnumMetadata(pool) {
+  console.log('[SCHEMA] Extracting enum metadata from pg_stats...');
+  
+  const query = `
+    SELECT 
+      tablename,
+      attname AS column_name,
+      n_distinct::int AS distinct_count,
+      most_common_vals::text AS common_values
+    FROM pg_stats
+    WHERE schemaname = 'public'
+      AND n_distinct > 0
+      AND n_distinct <= 20
+      AND n_distinct != -1
+    ORDER BY tablename, attname;
+  `;
+  
+  try {
+    const result = await pool.query(query);
+    
+    // Group by table -> column
+    const enumsByTable = {};
+    for (const row of result.rows) {
+      if (!enumsByTable[row.tablename]) {
+        enumsByTable[row.tablename] = {};
+      }
+      
+      const values = parsePostgresArray(row.common_values);
+      if (values.length > 0) {
+        enumsByTable[row.tablename][row.column_name] = {
+          distinct_count: row.distinct_count,
+          values: values
+        };
+      }
+    }
+    
+    const enumCount = Object.values(enumsByTable).reduce((sum, cols) => sum + Object.keys(cols).length, 0);
+    console.log(`[SCHEMA] Found ${enumCount} enum-like columns across ${Object.keys(enumsByTable).length} tables`);
+    
+    return enumsByTable;
+  } catch (error) {
+    console.error('[SCHEMA] Error extracting enum metadata:', error.message);
+    console.log('[SCHEMA] Note: pg_stats may be empty if ANALYZE has not been run');
+    return {};
+  }
+}
+
+/**
+ * Parse PostgreSQL array format {val1,val2,val3} to JS array
+ * Handles quoted values and special characters
+ */
+function parsePostgresArray(pgArray) {
+  if (!pgArray) return [];
+  
+  // Remove outer braces
+  let inner = pgArray.trim();
+  if (inner.startsWith('{') && inner.endsWith('}')) {
+    inner = inner.slice(1, -1);
+  }
+  
+  if (!inner) return [];
+  
+  // Parse values - handle quoted strings and commas within quotes
+  const values = [];
+  let current = '';
+  let inQuotes = false;
+  
+  for (let i = 0; i < inner.length; i++) {
+    const char = inner[i];
+    
+    if (char === '"' && (i === 0 || inner[i-1] !== '\\')) {
+      inQuotes = !inQuotes;
+    } else if (char === ',' && !inQuotes) {
+      values.push(current.trim().replace(/^"|"$/g, ''));
+      current = '';
+    } else {
+      current += char;
+    }
+  }
+  
+  // Don't forget the last value
+  if (current) {
+    values.push(current.trim().replace(/^"|"$/g, ''));
+  }
+  
+  // Filter out NULL and empty strings
+  return values.filter(v => v && v.toLowerCase() !== 'null');
+}
+
+/**
  * Get raw schema for ALL tables in a single pass to avoid N+1 queries
+ * Now includes enum metadata from pg_stats
  * @param {string} sessionId - Session identifier
  * @param {function} onProgress - Progress callback (not used for per-table anymore, but kept for signature)
- * @returns {Promise<Array>} Array of table schemas
+ * @returns {Promise<Array>} Array of table schemas with enum info
  */
 export async function getFullSchema(sessionId, onProgress = null) {
   const pool = getPool(sessionId);
@@ -86,10 +184,12 @@ export async function getFullSchema(sessionId, onProgress = null) {
       AND tc.table_name = ANY($1);
   `;
 
-  const [columnsResult, fksResult, pksResult] = await Promise.all([
+  // 5. Fetch enum metadata from pg_stats (NEW)
+  const [columnsResult, fksResult, pksResult, enumMetadata] = await Promise.all([
     pool.query(columnsQuery, [tables]),
     pool.query(fksQuery, [tables]),
-    pool.query(pksQuery, [tables])
+    pool.query(pksQuery, [tables]),
+    extractEnumMetadata(pool)
   ]);
 
   // Group by table
@@ -106,13 +206,22 @@ export async function getFullSchema(sessionId, onProgress = null) {
 
   columnsResult.rows.forEach(row => {
     if (schemaMap[row.table_name]) {
-      schemaMap[row.table_name].columns.push({
+      const column = {
         name: row.column_name,
         type: row.data_type,
         nullable: row.is_nullable === 'YES',
         default: row.column_default,
         maxLength: row.character_maximum_length
-      });
+      };
+      
+      // Check if this column has enum values (NEW)
+      const tableEnums = enumMetadata[row.table_name];
+      if (tableEnums && tableEnums[row.column_name]) {
+        column.is_enum = true;
+        column.enum_values = tableEnums[row.column_name].values;
+      }
+      
+      schemaMap[row.table_name].columns.push(column);
     }
   });
 

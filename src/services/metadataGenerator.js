@@ -26,9 +26,14 @@ export async function generateAllMetadata(rawSchemas, onProgress = null) {
 
   // Build a single prompt with all tables
   const tablesDescription = rawSchemas.map(schema => {
-    const columns = schema.columns.map(c => 
-      `    - ${c.name} (${c.type}${c.nullable ? ', nullable' : ''})`
-    ).join('\n');
+    const columns = schema.columns.map(c => {
+      let colDesc = `    - ${c.name} (${c.type}${c.nullable ? ', nullable' : ''})`;
+      // Include enum values if present (NEW)
+      if (c.is_enum && c.enum_values && c.enum_values.length > 0) {
+        colDesc += ` [ENUM: ${c.enum_values.join(', ')}]`;
+      }
+      return colDesc;
+    }).join('\n');
     
     const fks = schema.foreignKeys.length > 0
       ? schema.foreignKeys.map(fk => `    - ${fk.column} -> ${fk.references}`).join('\n')
@@ -61,7 +66,8 @@ Generate a JSON array with one object per table. Each object must have this exac
 IMPORTANT: 
 - Return a valid JSON array containing exactly ${rawSchemas.length} objects
 - No markdown, no explanation, ONLY the JSON array
-- Include ALL ${rawSchemas.length} tables in your response`;
+- Include ALL ${rawSchemas.length} tables in your response
+- For columns marked [ENUM: ...], the valid values are already provided - use them in the meaning`;
 
   try {
     console.log(`[METADATA] Sending ${rawSchemas.length} tables to Groq...`);
@@ -93,7 +99,10 @@ IMPORTANT:
     const parsed = JSON.parse(cleanJson);
     console.log(`[METADATA] ✅ Received metadata for ${parsed.length} tables`);
     
-    return parsed;
+    // Merge enum values from raw schema into parsed result (NEW)
+    const enrichedResult = mergeEnumValues(parsed, rawSchemas);
+    
+    return enrichedResult;
   } catch (error) {
     console.error('[METADATA] ❌ Error generating metadata:', error.message);
     
@@ -105,9 +114,48 @@ IMPORTANT:
         name: c.name,
         type: c.type,
         meaning: c.name.replace(/_/g, ' '),
+        ...(c.is_enum && c.enum_values ? { is_enum: true, enum_values: c.enum_values } : {})
       })),
       foreign_keys: schema.foreignKeys.map(fk => `${fk.references}`),
       common_queries: [],
     }));
   }
+}
+
+/**
+ * Merge enum values from raw schema into AI-enriched metadata
+ * This ensures enum_values are preserved even if AI doesn't include them
+ */
+function mergeEnumValues(enrichedMetadata, rawSchemas) {
+  // Create lookup map for raw schema columns
+  const rawSchemaMap = {};
+  rawSchemas.forEach(schema => {
+    rawSchemaMap[schema.table] = {};
+    schema.columns.forEach(col => {
+      if (col.is_enum && col.enum_values) {
+        rawSchemaMap[schema.table][col.name] = col.enum_values;
+      }
+    });
+  });
+  
+  // Merge enum values into enriched metadata
+  return enrichedMetadata.map(table => {
+    const tableEnums = rawSchemaMap[table.table] || {};
+    
+    if (table.columns) {
+      table.columns = table.columns.map(col => {
+        const enumValues = tableEnums[col.name];
+        if (enumValues) {
+          return {
+            ...col,
+            is_enum: true,
+            enum_values: enumValues
+          };
+        }
+        return col;
+      });
+    }
+    
+    return table;
+  });
 }
