@@ -3,8 +3,11 @@
 
 import express from 'express';
 import cors from 'cors';
+import { connectMongoDB } from './config/mongodb.js';
 import schemaRoutes from './routes/schema.routes.js';
 import queryRoutes from './routes/query.routes.js';
+import authRoutes from './routes/auth.routes.js';
+import userRoutes from './routes/user.routes.js';
 
 const app = express();
 const PORT = 8000;
@@ -32,6 +35,8 @@ app.get('/api/health', (req, res) => {
 });
 
 // Routes
+app.use('/api/auth', authRoutes);
+app.use('/api/user', userRoutes);
 app.use('/api/schema', schemaRoutes);
 app.use('/api/query', queryRoutes);
 
@@ -45,12 +50,25 @@ app.use((err, req, res, next) => {
   });
 });
 
-// Start server
-app.listen(PORT, () => {
-  console.log(`
+// Connect to MongoDB and start server
+async function startServer() {
+  try {
+    await connectMongoDB();
+    
+    app.listen(PORT, () => {
+      console.log(`
 ╔════════════════════════════════════════════╗
 ║    Dashboard AI Backend                    ║
 ║    Running on http://localhost:${PORT}         ║
+║    MongoDB: Connected                      ║
 ╚════════════════════════════════════════════╝
-  `);
-});
+      `);
+    });
+  } catch (error) {
+    console.error('Failed to start server:', error.message);
+    process.exit(1);
+  }
+}
+
+startServer();
+
