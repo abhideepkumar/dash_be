@@ -18,7 +18,8 @@
     "priority": 2,
     "expects": {
       "categoryKey": "string (required) - Column name for category labels (x-axis)",
-      "dataKey": "string or array (required) - Column name(s) for bar values (numeric)"
+      "dataKey": "string or array (required) - Column name(s) for bar values (numeric)",
+      "seriesKey": "string (optional) - Column name to group data into multiple bar series"
     }
   },
   {
@@ -28,7 +29,8 @@
     "priority": 2,
     "expects": {
       "categoryKey": "string (required) - Column name for x-axis (usually date/time)",
-      "dataKey": "string or array (required) - Column name(s) for line values"
+      "dataKey": "string or array (required) - Column name(s) for line values",
+      "seriesKey": "string (optional) - Column name to group data into multiple line series"
     }
   },
   {
@@ -38,7 +40,8 @@
     "priority": 2,
     "expects": {
       "categoryKey": "string (required) - Column name for x-axis",
-      "dataKey": "string or array (required) - Column name(s) for area values"
+      "dataKey": "string or array (required) - Column name(s) for area values",
+      "seriesKey": "string (optional) - Column name to group data into multiple area series"
     }
   },
   {
@@ -90,6 +93,17 @@
     "expects": {
       "label": "string (required) - The text to display",
       "variant": "string (optional) - 'default', 'secondary', 'destructive', 'outline'"
+    }
+  },
+  {
+    "component": "Heatmap",
+    "description": "A 2D grid visualization using color intensity to show values across two categorical dimensions.",
+    "use_when": "Displaying data with TWO categorical dimensions and one numeric value. Perfect for user×month, product×region, or any matrix-style data. Use when you have many series (>5) that would clutter a line chart.",
+    "priority": 2,
+    "expects": {
+      "xKey": "string (required) - Column name for x-axis categories (e.g., month, date)",
+      "yKey": "string (required) - Column name for y-axis categories (e.g., user_name, product)",
+      "valueKey": "string (required) - Column name for the numeric value (color intensity)"
     }
   }
 ]
