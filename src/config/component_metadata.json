@@ -81,7 +81,7 @@
     "use_when": "Visualizing a single percentage or completion rate (0-100).",
     "priority": 1,
     "expects": {
-      "value": "number (required) - Value between 0 and 100",
+      "value": "number (required) - Value between 0 and  100",
       "label": "string (optional) - Label"
     }
   },
