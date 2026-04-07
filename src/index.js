@@ -1,5 +1,5 @@
-// Load environment variables FIRST (before any other imports)
-// import 'dotenv/config'; // REMOVED: Hardcoding env vars
+import dotenv from 'dotenv';
+dotenv.config({ override: true });
 
 import express from 'express';
 import cors from 'cors';
@@ -9,6 +9,7 @@ import queryRoutes from './routes/query.routes.js';
 import authRoutes from './routes/auth.routes.js';
 import userRoutes from './routes/user.routes.js';
 import logsRoutes from './routes/logs.routes.js';
+import healthRoutes from './routes/health.routes.js';
 
 const app = express();
 const PORT = 8000;
@@ -27,13 +28,7 @@ app.use((req, res, next) => {
 });
 
 // Health check
-app.get('/api/health', (req, res) => {
-  res.json({ 
-    status: 'ok', 
-    timestamp: new Date().toISOString(),
-    service: 'Dashboard AI Backend'
-  });
-});
+app.use('/api/health', healthRoutes);
 
 // Routes
 app.use('/api/auth', authRoutes);

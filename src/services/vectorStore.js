@@ -17,7 +17,7 @@ function getIndexName() {
 function getPineconeClient() {
   if (!pinecone) {
     pinecone = new Pinecone({
-      apiKey: 'pcsk_4Tcxpx_UQUGiT9wZxwCBirDmDsfLj6o9McKw8CNiuegb771wTjD7srYRB8EY4boSKpbqSZ',
+      apiKey: process.env.PINECONE_API_KEY,
     });
   }
   return pinecone;

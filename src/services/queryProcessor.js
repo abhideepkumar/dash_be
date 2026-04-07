@@ -2,9 +2,9 @@ import OpenAI from "openai";
 import { searchRelevantTables } from './vectorStore.js';
 import { deserializeGraph, expandWithGraph } from './schemaGraph.js';
 
-// Groq client (hardcoded API key as per earlier request)
+// Groq client
 const groqClient = new OpenAI({
-  apiKey: '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',
+  apiKey: process.env.GROQ_API_KEY,
   baseURL: "https://api.groq.com/openai/v1",
 });
 
