@@ -8,20 +8,7 @@
  * 4. PRIORITIZE - Score and rank insights by importance
  */
 
-import OpenAI from "openai";
-
-// Groq client (lazy-initialized)
-let client = null;
-
-function getGroqClient() {
-  if (!client) {
-    client = new OpenAI({
-      apiKey: process.env.GROQ_API_KEY,
-      baseURL: "https://api.groq.com/openai/v1",
-    });
-  }
-  return client;
-}
+import { callLLM } from '../utils/llmClient.js';
 
 // ============================================
 // STAGE 1: DATA CLASSIFICATION
@@ -331,26 +318,22 @@ Return ONLY a valid JSON array, no markdown:
 [{"type":"...","priority":"...","text":"...","evidence":"..."}]`;
 
   try {
-    const groq = getGroqClient();
-    const response = await groq.chat.completions.create({
-      model: "llama-3.3-70b-versatile",
-      messages: [{ role: "user", content: prompt }],
-      temperature: 0.3,
-      max_tokens: 800,
-    });
-    
-    let content = response.choices[0].message.content.trim();
-    
-    // Clean up response
-    if (content.startsWith('```json')) content = content.slice(7);
-    if (content.startsWith('```')) content = content.slice(3);
-    if (content.endsWith('```')) content = content.slice(0, -3);
-    content = content.trim();
-    
-    const insights = JSON.parse(content);
+    const { content: raw } = await callLLM(
+      [{ role: 'user', content: prompt }],
+      { temperature: 0.3, max_tokens: 800 }
+    );
+
+    // Clean up any markdown wrappers the LLM may add
+    let cleaned = raw;
+    if (cleaned.startsWith('```json')) cleaned = cleaned.slice(7);
+    if (cleaned.startsWith('```')) cleaned = cleaned.slice(3);
+    if (cleaned.endsWith('```')) cleaned = cleaned.slice(0, -3);
+    cleaned = cleaned.trim();
+
+    const insights = JSON.parse(cleaned);
     console.log(`[INSIGHTS] LLM generated ${insights.length} insights`);
     return insights;
-    
+
   } catch (error) {
     console.error('[INSIGHTS] LLM synthesis failed:', error.message);
     // Fallback insight

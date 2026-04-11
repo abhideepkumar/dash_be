@@ -1,19 +1,6 @@
-import OpenAI from "openai";
+import { callLLM } from '../utils/llmClient.js';
 import { searchRelevantTables } from './vectorStore.js';
 import { deserializeGraph, expandWithGraph } from './schemaGraph.js';
-
-// Groq client (lazy-initialized)
-let client = null;
-
-function getGroqClient() {
-  if (!client) {
-    client = new OpenAI({
-      apiKey: process.env.GROQ_API_KEY,
-      baseURL: "https://api.groq.com/openai/v1",
-    });
-  }
-  return client;
-}
 
 // Session graph storage (populated from schema extraction)
 const sessionGraphs = new Map();
@@ -53,17 +40,12 @@ Rules:
 Enhanced query:`;
 
   try {
-    const groq = getGroqClient();
-    const response = await groq.chat.completions.create({
-      model: "llama-3.3-70b-versatile",
-      messages: [{ role: "user", content: prompt }],
-      temperature: 0.3,
-      max_tokens: 200,
-    });
-
-    const enhanced = response.choices[0].message.content.trim();
-    console.log(`[QUERY] Enhanced: "${query}" -> "${enhanced}"`);
-    return enhanced;
+    const { content } = await callLLM(
+      [{ role: 'user', content: prompt }],
+      { temperature: 0.3, max_tokens: 200 }
+    );
+    console.log(`[QUERY] Enhanced: "${query}" -> "${content}"`);
+    return content;
   } catch (error) {
     console.error('[QUERY] Error enhancing query:', error.message);
     // Fallback to original query if enhancement fails
@@ -121,15 +103,12 @@ Rules:
 SQL Query:`;
 
   try {
-    const groq = getGroqClient();
-    const response = await groq.chat.completions.create({
-      model: "llama-3.3-70b-versatile",
-      messages: [{ role: "user", content: prompt }],
-      temperature: 0.2,
-      max_tokens: 500,
-    });
+    const { content: rawSql } = await callLLM(
+      [{ role: 'user', content: prompt }],
+      { temperature: 0.2, max_tokens: 500 }
+    );
 
-    let sql = response.choices[0].message.content.trim();
+    let sql = rawSql;
     
     // Clean up any markdown code blocks if present
     if (sql.startsWith('```sql')) {

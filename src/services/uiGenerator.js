@@ -1,8 +1,8 @@
-import OpenAI from "openai";
 import { readFileSync } from 'fs';
 import { fileURLToPath } from 'url';
 import { dirname, join } from 'path';
 import { generateInsights } from './insightGenerator.js';
+import { callLLM } from '../utils/llmClient.js';
 
 // Get current directory for loading component metadata
 const __filename = fileURLToPath(import.meta.url);
@@ -11,19 +11,6 @@ const __dirname = dirname(__filename);
 // Load component metadata
 const componentMetadataPath = join(__dirname, '../config/component_metadata.json');
 const componentMetadata = JSON.parse(readFileSync(componentMetadataPath, 'utf-8'));
-
-// Groq client (lazy-initialized)
-let client = null;
-
-function getGroqClient() {
-  if (!client) {
-    client = new OpenAI({
-      apiKey: process.env.GROQ_API_KEY,
-      baseURL: "https://api.groq.com/openai/v1",
-    });
-  }
-  return client;
-}
 
 // Time-related column name patterns
 const TIME_PATTERNS = /^(date|month|year|week|quarter|day|time|period|created|updated|timestamp)$|(_at|_date|_time)$/i;
@@ -293,16 +280,14 @@ JSON Output:`;
   try {
     // Generate UI spec and insights in parallel for better performance
     const [uiResponse, insights] = await Promise.all([
-      getGroqClient().chat.completions.create({
-        model: "llama-3.3-70b-versatile",
-        messages: [{ role: "user", content: prompt }],
-        temperature: 0.1,
-        max_tokens: 2000,
-      }),
+      callLLM(
+        [{ role: 'user', content: prompt }],
+        { temperature: 0.1, max_tokens: 2000 }
+      ),
       generateInsights({ originalQuery, rows, fields, chartType: null })
     ]);
 
-    let content = uiResponse.choices[0].message.content.trim();
+    let content = uiResponse.content.trim();
     
     // Clean up any markdown code blocks if present
     if (content.startsWith('```json')) {

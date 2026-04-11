@@ -2,25 +2,36 @@ import express from 'express';
 import mongoose from 'mongoose';
 import { getPool } from '../config/db.js';
 import { Pinecone } from '@pinecone-database/pinecone';
-import OpenAI from "openai";
+import { callLLM, getLLMConfig } from '../utils/llmClient.js';
 import { authenticateToken } from '../middleware/auth.js';
 
 const router = express.Router();
 
 router.get('/status', authenticateToken, async (req, res) => {
   const { sessionId } = req.query;
+
+  // Resolve active LLM provider info upfront (safe — never throws)
+  let llmConfig = { provider: 'unknown', defaultModel: 'unknown', baseURL: '' };
+  try {
+    llmConfig = getLLMConfig();
+  } catch (configErr) {
+    // Config error handled below in the LLM check
+  }
+
   const results = {
     timestamp: new Date().toISOString(),
     services: {
-      mongodb: { status: 'unknown', message: '' },
+      mongodb:  { status: 'unknown', message: '' },
       postgres: { status: 'unknown', message: '' },
       pinecone: { status: 'unknown', message: '' },
-      groq: { status: 'unknown', message: '' },
+      llm:      { status: 'unknown', provider: llmConfig.provider, model: llmConfig.defaultModel, message: '' },
     },
     env: {
-      PINECONE_API_KEY: !!process.env.PINECONE_API_KEY,
-      GROQ_API_KEY: !!process.env.GROQ_API_KEY,
-      PORT: process.env.PORT || '8000',
+      LLM_PROVIDER:        process.env.LLM_PROVIDER || 'groq (default)',
+      GROQ_API_KEY:        !!process.env.GROQ_API_KEY,
+      NVIDIA_NIM_API_KEY:  !!process.env.NVIDIA_NIM_API_KEY,
+      PINECONE_API_KEY:    !!process.env.PINECONE_API_KEY,
+      PORT:                process.env.PORT || '8000',
     }
   };
 
@@ -31,7 +42,7 @@ router.get('/status', authenticateToken, async (req, res) => {
     if (mongoStatus === 1) {
       results.services.mongodb = { status: 'connected', message: 'Successfully connected' };
     } else {
-      results.services.mongodb = { status: 'disconnected', message: `Status code: ${mongoStatus}` };
+      results.services.mongodb = { status: 'disconnected', message: `State code: ${mongoStatus}` };
     }
   } catch (err) {
     results.services.mongodb = { status: 'error', message: err.message };
@@ -56,33 +67,37 @@ router.get('/status', authenticateToken, async (req, res) => {
 
   // 3. Pinecone Check
   try {
-    const pinecone = new Pinecone({
-      apiKey: process.env.PINECONE_API_KEY,
-    });
-    // Check if we can list indexes
+    const pinecone = new Pinecone({ apiKey: process.env.PINECONE_API_KEY });
     await pinecone.listIndexes();
     results.services.pinecone = { status: 'connected', message: 'API responds correctly' };
   } catch (err) {
     results.services.pinecone = { status: 'error', message: err.message };
   }
 
-  // 4. Groq Check
+  // 4. LLM Provider Health Check (provider-agnostic)
+  // Sends a minimal prompt to verify the active provider is reachable and authenticated.
   try {
-    const groqClient = new OpenAI({
-      apiKey: process.env.GROQ_API_KEY,
-      baseURL: "https://api.groq.com/openai/v1",
-    });
-    // List models as a health check
-    await groqClient.models.list();
-    results.services.groq = { status: 'connected', message: 'API responds correctly' };
+    const { content } = await callLLM(
+      [{ role: 'user', content: 'Reply with only the word: ok' }],
+      { temperature: 0, max_tokens: 5 }
+    );
+    results.services.llm = {
+      status: 'connected',
+      provider: llmConfig.provider,
+      model: llmConfig.defaultModel,
+      message: `API responds correctly (reply: "${content?.slice(0, 20)}")`,
+    };
   } catch (err) {
-    results.services.groq = { status: 'error', message: err.message };
+    results.services.llm = {
+      status: 'error',
+      provider: llmConfig.provider,
+      model: llmConfig.defaultModel,
+      message: err.message,
+    };
   }
 
-  res.json({
-    success: true,
-    ...results
-  });
+  res.json({ success: true, ...results });
 });
 
 export default router;
+

@@ -1,17 +1,4 @@
-import OpenAI from "openai";
-
-// Lazy-initialized client
-let client = null;
-
-function getGroqClient() {
-  if (!client) {
-    client = new OpenAI({
-      apiKey: process.env.GROQ_API_KEY,
-      baseURL: "https://api.groq.com/openai/v1",
-    });
-  }
-  return client;
-}
+import { callLLM } from '../utils/llmClient.js';
 
 /**
  * Generate semantic metadata for ALL tables in a single LLM call
@@ -70,19 +57,13 @@ IMPORTANT:
 - For columns marked [ENUM: ...], the valid values are already provided - use them in the meaning`;
 
   try {
-    console.log(`[METADATA] Sending ${rawSchemas.length} tables to Groq...`);
-    
-    const groq = getGroqClient();
-    const response = await groq.chat.completions.create({
-      model: "llama-3.3-70b-versatile",
-      messages: [
-        { role: "user", content: prompt }
-      ],
-      temperature: 0.3,
-    });
-    
-    const responseText = response.choices[0].message.content;
-    
+    console.log(`[METADATA] Sending ${rawSchemas.length} tables to LLM...`);
+
+    const { content: responseText } = await callLLM(
+      [{ role: 'user', content: prompt }],
+      { temperature: 0.3 }
+    );
+
     // Clean up response - remove markdown code blocks if present
     let cleanJson = responseText.trim();
     if (cleanJson.startsWith('```json')) {
