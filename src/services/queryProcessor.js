@@ -25,24 +25,40 @@ export function getSessionGraph(sessionId) {
  * @param {string} query - Original user query
  * @returns {Promise<string>} Enhanced query
  */
-export async function enhanceQuery(query) {
-  const prompt = `You are a database query assistant. Your task is to enhance and clarify the following natural language query to make it more precise for searching database tables and generating SQL.
+export async function enhanceQuery(query, history = []) {
+  // Build the history context section for the prompt
+  let historySection = '';
+  if (history.length > 0) {
+    // Cap at last 5 entries to keep prompt size manageable
+    const recentHistory = history.slice(-5);
+    historySection = `\nConversation History (most recent last):\n${recentHistory
+      .map((entry, i) => `  Turn ${i + 1}:\n    User asked: "${entry.query}"\n    SQL generated: ${entry.sql}`)
+      .join('\n')}\n`;
+  }
 
-Original query: "${query}"
+  const hasHistory = history.length > 0;
+
+  const prompt = `You are a database query assistant. ${
+    hasHistory
+      ? 'Given the conversation history below and a new user query, rewrite the NEW query into a fully standalone, self-contained question that can be understood without any prior context.'
+      : 'Your task is to enhance and clarify the following natural language query to make it more precise for searching database tables and generating SQL.'
+  }
+${ historySection }
+New user query: "${query}"
 
 Rules:
-1. Make the query more specific and clear
-2. Expand abbreviations if any
-3. Add relevant keywords that might help in database search
-4. Keep it as a natural language question, NOT SQL
-5. Return ONLY the enhanced query, nothing else
+1. ${ hasHistory ? 'If the new query references prior context ("that", "those", "filter it", "same tables", etc.), merge the context into a single standalone question.' : 'Make the query more specific and clear.' }
+2. ${ hasHistory ? 'If the new query is already fully standalone, return it with only minor clarifications.' : 'Expand abbreviations if any.' }
+3. Add relevant database keywords that help in table/column search.
+4. Keep it as a natural language question, NOT SQL.
+5. Return ONLY the rewritten query, nothing else.
 
-Enhanced query:`;
+Rewritten query:`;
 
   try {
     const { content } = await callLLM(
       [{ role: 'user', content: prompt }],
-      { temperature: 0.3, max_tokens: 200 }
+      { temperature: 0.3, max_tokens: 300 }
     );
     console.log(`[QUERY] Enhanced: "${query}" -> "${content}"`);
     return content;
@@ -59,7 +75,7 @@ Enhanced query:`;
  * @param {Array} tables - Array of relevant table schemas
  * @returns {Promise<string>} Generated SQL query
  */
-export async function generateSQL(query, tables) {
+export async function generateSQL(query, tables, history = []) {
   // Format table schemas for the prompt with enum values
   const schemaText = tables.map(t => {
     const cols = t.columns.map(c => {
@@ -84,7 +100,16 @@ ${cols}
 ${fks}`;
   }).join('\n\n');
 
-  const prompt = `You are a PostgreSQL expert. Generate a SQL query based on the user's request and the available table schemas.
+  // Inject conversation history context for follow-up queries
+  let historyContext = '';
+  if (history.length > 0) {
+    const recentHistory = history.slice(-5);
+    historyContext = `\n## Prior Conversation Context\nThe current request may be a follow-up. Use the prior SQL as reference for table aliases, column selections, and filter patterns.\n${recentHistory
+      .map((entry, i) => `  Turn ${i + 1}: User asked "${entry.query}"\n  SQL: ${entry.sql}`)
+      .join('\n')}\n`;
+  }
+
+  const prompt = `You are a PostgreSQL expert. Generate a SQL query based on the user's request and the available table schemas.${ historyContext }
 
 User Request: "${query}"
 
@@ -138,20 +163,21 @@ SQL Query:`;
  * @param {function} onStep - Optional callback for logging steps: (stepName, input, output, durationMs, error?) => void
  * @returns {Promise<Object>} Result containing enhancedQuery, relevantTables, and sql
  */
-export async function processUserQuery(query, sessionId, topK = 5, onStep = null) {
-  console.log(`[QUERY] Processing query: "${query}" for session: ${sessionId}`);
+export async function processUserQuery(query, sessionId, topK = 5, onStep = null, history = []) {
+  console.log(`[QUERY] Processing query: "${query}" for session: ${sessionId} (history: ${history.length} turns)`);
 
-  // Step 1: Enhance the query (DISABLED for testing - using raw query instead)
+  // Step 1: Enhance the query (context-aware rewriting for follow-ups)
   let enhancedQuery = query;
   let stepStart = Date.now();
   
-  // Uncomment to enable query enhancement:
-  // try {
-  //   enhancedQuery = await enhanceQuery(query);
-  //   if (onStep) onStep('enhance', { query }, { enhancedQuery }, Date.now() - stepStart);
-  // } catch (err) {
-  //   if (onStep) onStep('enhance', { query }, null, Date.now() - stepStart, err.message);
-  // }
+  try {
+    enhancedQuery = await enhanceQuery(query, history);
+    if (onStep) onStep('enhance', { query, historyTurns: history.length }, { enhancedQuery }, Date.now() - stepStart);
+  } catch (err) {
+    if (onStep) onStep('enhance', { query }, null, Date.now() - stepStart, err.message);
+    // Non-fatal: fall back to raw query
+    enhancedQuery = query;
+  }
 
   // Step 2: Search for relevant tables using vector store
   stepStart = Date.now();
@@ -215,11 +241,11 @@ export async function processUserQuery(query, sessionId, topK = 5, onStep = null
   stepStart = Date.now();
   let sql;
   try {
-    sql = await generateSQL(enhancedQuery, relevantTables);
+    sql = await generateSQL(enhancedQuery, relevantTables, history);
     
     if (onStep) {
       onStep('sql_generate',
-        { query: enhancedQuery, tableCount: relevantTables.length },
+        { query: enhancedQuery, tableCount: relevantTables.length, historyTurns: history.length },
         { sql, sqlLength: sql.length },
         Date.now() - stepStart
       );

@@ -61,7 +61,7 @@ async function ensureConnection(sessionId, userId) {
  */
 router.post('/generate', authenticateToken, async (req, res) => {
   try {
-    const { sessionId, query, topK = 5 } = req.body;
+    const { sessionId, query, topK = 5, history = [] } = req.body;
     const userId = req.user?.userId || null;
 
     if (userId) {
@@ -103,8 +103,8 @@ router.post('/generate', authenticateToken, async (req, res) => {
 
     console.log(`[QUERY ROUTE] Processing query: "${query}"`);
 
-    // Create log entry
-    const requestId = await createLog(userId, query, sessionId);
+    // Create log entry (history is persisted for follow-up tracing)
+    const requestId = await createLog(userId, query, sessionId, history);
 
     // Step logging callback
     const onStep = async (stepName, input, output, durationMs, error = null) => {
@@ -112,7 +112,7 @@ router.post('/generate', authenticateToken, async (req, res) => {
     };
 
     try {
-      const result = await processUserQuery(query, sessionId, topK, onStep);
+      const result = await processUserQuery(query, sessionId, topK, onStep, history);
       
       // Store requestId for subsequent steps
       activeRequestLogs.set(sessionId + '_latest', requestId);

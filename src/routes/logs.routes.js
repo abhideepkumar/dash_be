@@ -32,7 +32,9 @@ router.get('/', authenticateToken, async (req, res) => {
         stepCount: log.steps?.length || 0,
         totalDurationMs: log.totalDurationMs,
         createdAt: log.createdAt,
-        completedAt: log.completedAt
+        completedAt: log.completedAt,
+        isFollowUp: log.isFollowUp || false,
+        historyDepth: log.conversationHistory?.length || 0,
       }))
     });
   } catch (error) {

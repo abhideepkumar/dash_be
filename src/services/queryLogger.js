@@ -11,9 +11,10 @@ import QueryLog from '../models/QueryLog.js';
  * @param {string} userId - User ID (can be null for anonymous)
  * @param {string} query - Original user query
  * @param {string} sessionId - Session ID
+ * @param {Array} history - Conversation history [{query, sql}] passed into this request
  * @returns {Promise<string>} Request ID for tracking
  */
-export async function createLog(userId, query, sessionId) {
+export async function createLog(userId, query, sessionId, history = []) {
   const requestId = randomUUID();
   
   const log = await QueryLog.create({
@@ -21,12 +22,14 @@ export async function createLog(userId, query, sessionId) {
     requestId,
     originalQuery: query,
     sessionId,
+    conversationHistory: history,
+    isFollowUp: history.length > 0,
     steps: [],
     status: 'pending',
     createdAt: new Date()
   });
   
-  console.log(`[LOG] Created query log: ${requestId}`);
+  console.log(`[LOG] Created query log: ${requestId} (isFollowUp: ${history.length > 0}, turns: ${history.length})`);
   return requestId;
 }
 

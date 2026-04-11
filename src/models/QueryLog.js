@@ -49,6 +49,22 @@ const queryLogSchema = new mongoose.Schema({
     type: String,
     required: true
   },
+
+  // Conversational context — stores the history of (query, sql) pairs that were
+  // passed in with this request, enabling follow-up tracing and replay.
+  conversationHistory: {
+    type: [{
+      query: { type: String },
+      sql: { type: String }
+    }],
+    default: []
+  },
+
+  // True when this log entry is a follow-up to a prior query in the same panel
+  isFollowUp: {
+    type: Boolean,
+    default: false
+  },
   
   // Processing steps
   steps: [stepSchema],
