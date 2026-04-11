@@ -10,11 +10,18 @@
 
 import OpenAI from "openai";
 
-// Groq client
-const groqClient = new OpenAI({
-  apiKey: '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',
-  baseURL: "https://api.groq.com/openai/v1",
-});
+// Groq client (lazy-initialized)
+let client = null;
+
+function getGroqClient() {
+  if (!client) {
+    client = new OpenAI({
+      apiKey: process.env.GROQ_API_KEY,
+      baseURL: "https://api.groq.com/openai/v1",
+    });
+  }
+  return client;
+}
 
 // ============================================
 // STAGE 1: DATA CLASSIFICATION
@@ -324,7 +331,8 @@ Return ONLY a valid JSON array, no markdown:
 [{"type":"...","priority":"...","text":"...","evidence":"..."}]`;
 
   try {
-    const response = await groqClient.chat.completions.create({
+    const groq = getGroqClient();
+    const response = await groq.chat.completions.create({
       model: "llama-3.3-70b-versatile",
       messages: [{ role: "user", content: prompt }],
       temperature: 0.3,

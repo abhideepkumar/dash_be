@@ -2,11 +2,18 @@ import OpenAI from "openai";
 import { searchRelevantTables } from './vectorStore.js';
 import { deserializeGraph, expandWithGraph } from './schemaGraph.js';
 
-// Groq client
-const groqClient = new OpenAI({
-  apiKey: process.env.GROQ_API_KEY,
-  baseURL: "https://api.groq.com/openai/v1",
-});
+// Groq client (lazy-initialized)
+let client = null;
+
+function getGroqClient() {
+  if (!client) {
+    client = new OpenAI({
+      apiKey: process.env.GROQ_API_KEY,
+      baseURL: "https://api.groq.com/openai/v1",
+    });
+  }
+  return client;
+}
 
 // Session graph storage (populated from schema extraction)
 const sessionGraphs = new Map();
@@ -46,7 +53,8 @@ Rules:
 Enhanced query:`;
 
   try {
-    const response = await groqClient.chat.completions.create({
+    const groq = getGroqClient();
+    const response = await groq.chat.completions.create({
       model: "llama-3.3-70b-versatile",
       messages: [{ role: "user", content: prompt }],
       temperature: 0.3,
@@ -113,7 +121,8 @@ Rules:
 SQL Query:`;
 
   try {
-    const response = await groqClient.chat.completions.create({
+    const groq = getGroqClient();
+    const response = await groq.chat.completions.create({
       model: "llama-3.3-70b-versatile",
       messages: [{ role: "user", content: prompt }],
       temperature: 0.2,

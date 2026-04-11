@@ -6,7 +6,7 @@ let client = null;
 function getGroqClient() {
   if (!client) {
     client = new OpenAI({
-      apiKey: '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',
+      apiKey: process.env.GROQ_API_KEY,
       baseURL: "https://api.groq.com/openai/v1",
     });
   }

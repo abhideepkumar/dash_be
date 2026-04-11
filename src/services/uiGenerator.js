@@ -12,11 +12,18 @@ const __dirname = dirname(__filename);
 const componentMetadataPath = join(__dirname, '../config/component_metadata.json');
 const componentMetadata = JSON.parse(readFileSync(componentMetadataPath, 'utf-8'));
 
-// Groq client
-const groqClient = new OpenAI({
-  apiKey: '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',
-  baseURL: "https://api.groq.com/openai/v1",
-});
+// Groq client (lazy-initialized)
+let client = null;
+
+function getGroqClient() {
+  if (!client) {
+    client = new OpenAI({
+      apiKey: process.env.GROQ_API_KEY,
+      baseURL: "https://api.groq.com/openai/v1",
+    });
+  }
+  return client;
+}
 
 // Time-related column name patterns
 const TIME_PATTERNS = /^(date|month|year|week|quarter|day|time|period|created|updated|timestamp)$|(_at|_date|_time)$/i;
@@ -286,7 +293,7 @@ JSON Output:`;
   try {
     // Generate UI spec and insights in parallel for better performance
     const [uiResponse, insights] = await Promise.all([
-      groqClient.chat.completions.create({
+      getGroqClient().chat.completions.create({
         model: "llama-3.3-70b-versatile",
         messages: [{ role: "user", content: prompt }],
         temperature: 0.1,
