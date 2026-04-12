@@ -16,7 +16,9 @@ const componentMetadata = JSON.parse(readFileSync(componentMetadataPath, 'utf-8'
 const TIME_PATTERNS = /^(date|month|year|week|quarter|day|time|period|created|updated|timestamp)$|(_at|_date|_time)$/i;
 
 /**
- * Analyze data shape to determine the best visualization strategy
+ * Analyze data shape to determine the best visualization strategy.
+ * Returns data pattern descriptors instead of hardcoded chart recommendations,
+ * so the LLM can match patterns to the `use_when` field in component metadata.
  * @param {Array} rows - Query result rows
  * @param {Array} fields - Field definitions
  * @returns {object} Data analysis results
@@ -30,7 +32,7 @@ function analyzeDataShape(rows, fields) {
       isTimeSeries: false,
       isMultiSeries: false,
       seriesCount: 0,
-      recommendedChart: 'Table',
+      dataPatterns: ['no_data'],
       analysisNotes: 'No data to analyze'
     };
   }
@@ -79,8 +81,6 @@ function analyzeDataShape(rows, fields) {
 
   // Determine data patterns
   const isTimeSeries = timeColumn !== null;
-  const hasMultipleCategories = categoryColumns.length >= 2;
-  const hasOneCategoryOneTime = categoryColumns.length === 1 && isTimeSeries;
   
   // For multi-series: if we have both a time column and a category column (like user + month)
   // the series count is the unique values in the category column
@@ -104,37 +104,43 @@ function analyzeDataShape(rows, fields) {
     seriesCount = seriesColumn.uniqueCount;
   }
 
-  // Recommend chart type based on analysis
-  let recommendedChart = 'Table';
-  let analysisNotes = '';
-
-  if (rowCount === 1 && (numericColumns.length === 1 || (numericColumns.length === 0 && categoryColumns.length <= 2))) {
-    recommendedChart = 'Card';
-    analysisNotes = 'Single row with 1-2 values → Card';
-  } else if (isMultiSeries && seriesCount > 5) {
-    recommendedChart = 'Heatmap';
-    analysisNotes = `Multi-series with ${seriesCount} series (>5) → Heatmap for 2D grid visualization`;
-  } else if (isMultiSeries && seriesCount <= 5) {
-    recommendedChart = isTimeSeries ? 'LineChart' : 'BarChart';
-    analysisNotes = `Multi-series with ${seriesCount} series (≤5) → ${recommendedChart} with seriesKey`;
-  } else if (isTimeSeries && numericColumns.length >= 1) {
-    recommendedChart = 'LineChart';
-    analysisNotes = 'Time series data → LineChart';
-  } else if (categoryColumns.length === 1 && numericColumns.length >= 1) {
-    if (rowCount <= 8) {
-      recommendedChart = 'PieChart';
-      analysisNotes = `${rowCount} categories (≤8) → PieChart`;
-    } else if (rowCount <= 50) {
-      recommendedChart = 'BarChart';
-      analysisNotes = `${rowCount} categories (9-50) → BarChart`;
-    } else {
-      recommendedChart = 'Table';
-      analysisNotes = `${rowCount} categories (>50) → Table for readability`;
-    }
-  } else if (rowCount > 100) {
-    recommendedChart = 'Table';
-    analysisNotes = `Large dataset (${rowCount} rows) → Table`;
+  // Build data pattern tags (descriptive, not prescriptive)
+  const dataPatterns = [];
+  
+  if (rowCount === 1 && (numericColumns.length <= 2 && categoryColumns.length <= 2)) {
+    dataPatterns.push('single_value');
   }
+  if (isTimeSeries) {
+    dataPatterns.push('time_series');
+  }
+  if (isMultiSeries && seriesCount > 5) {
+    dataPatterns.push('high_cardinality_series');
+    dataPatterns.push('two_dimensions');
+  }
+  if (isMultiSeries && seriesCount <= 5) {
+    dataPatterns.push('low_cardinality_series');
+  }
+  if (categoryColumns.length === 1 && numericColumns.length >= 1 && !isTimeSeries) {
+    dataPatterns.push('category_comparison');
+    if (rowCount <= 8) dataPatterns.push('few_categories');
+    if (rowCount > 8 && rowCount <= 50) dataPatterns.push('moderate_categories');
+  }
+  if (numericColumns.length >= 1) {
+    dataPatterns.push('has_numeric');
+    const allBetween0and100 = numericColumns.every(c => c.min >= 0 && c.max <= 100);
+    if (allBetween0and100 && rowCount <= 5) dataPatterns.push('percentage_range');
+  }
+  if (rowCount > 50) {
+    dataPatterns.push('large_dataset');
+  }
+  if (dataPatterns.length === 0) {
+    dataPatterns.push('general');
+  }
+
+  // Build analysis notes (human readable summary)
+  let analysisNotes = `${rowCount} rows, ${numericColumns.length} numeric cols, ${categoryColumns.length} category cols`;
+  if (isTimeSeries) analysisNotes += ', time-series detected';
+  if (isMultiSeries) analysisNotes += `, multi-series (${seriesCount} series)`;
 
   return {
     rowCount,
@@ -145,7 +151,7 @@ function analyzeDataShape(rows, fields) {
     isMultiSeries,
     seriesColumn: seriesColumn?.name || null,
     seriesCount,
-    recommendedChart,
+    dataPatterns,
     analysisNotes
   };
 }
@@ -171,17 +177,28 @@ export async function generateUISpec({ originalQuery, sql, rows, fields }) {
   // Sample data (first 4 rows) to help LLM understand the data shape
   const sampleData = rows.slice(0, 4);
   
-  // Format component metadata for the prompt
+  // --- DYNAMICALLY GENERATED from component_metadata.json ---
+
+  // 1. Component descriptions (already dynamic - good)
   const componentDescriptions = componentMetadata.map(c => {
-    return `### ${c.component}
+    return `### ${c.component} (priority: ${c.priority})
 Description: ${c.description}
 Use when: ${c.use_when}
 Expected props: ${JSON.stringify(c.expects, null, 2)}`;
   }).join('\n\n');
 
-  // Build data analysis section for the prompt
+  // 2. Valid type enum - dynamically generated
+  const validTypeEnum = componentMetadata.map(c => `"${c.component}"`).join(' | ');
+
+  // 3. Props format section - dynamically generated from props_example
+  const propsFormatSection = componentMetadata
+    .filter(c => c.props_example)
+    .map(c => `For ${c.component}:\n${JSON.stringify(c.props_example, null, 2)}`)
+    .join('\n\n');
+
+  // 4. Data analysis section for the prompt
   const analysisSection = `
-## Data Analysis (PRE-COMPUTED - follow these recommendations)
+## Data Analysis (PRE-COMPUTED)
 - Row count: ${dataAnalysis.rowCount}
 - Category columns: ${dataAnalysis.categoryColumns.map(c => `${c.name} (${c.uniqueCount} unique)`).join(', ') || 'none'}
 - Numeric columns: ${dataAnalysis.numericColumns.map(c => c.name).join(', ') || 'none'}
@@ -190,7 +207,7 @@ Expected props: ${JSON.stringify(c.expects, null, 2)}`;
 - Is multi-series: ${dataAnalysis.isMultiSeries}
 - Series column: ${dataAnalysis.seriesColumn || 'N/A'}
 - Series count: ${dataAnalysis.seriesCount}
-- **RECOMMENDED CHART: ${dataAnalysis.recommendedChart}**
+- **Data patterns: [${dataAnalysis.dataPatterns.join(', ')}]**
 - Analysis notes: ${dataAnalysis.analysisNotes}
 `;
 
@@ -212,65 +229,33 @@ ${analysisSection}
 ## Available UI Components
 ${componentDescriptions}
 
-## CRITICAL: Multi-Series Data Handling Rules
-1. If "Is multi-series" is TRUE and "Series count" > 5:
-   → Use **Heatmap** (perfect for user×month, product×region grids)
-   → Shows 2D grid with color intensity for values
-2. If "Is multi-series" is TRUE and "Series count" ≤ 5:
-   → Use LineChart (if time-based) or BarChart with "seriesKey" prop
-3. If data has a time column with only 1 category dimension:
-   → Use LineChart (single line trend)
+## How to Choose
+1. Look at the **Data patterns** above
+2. Match them against each component's **"Use when"** criteria
+3. Prefer components with lower **priority** numbers when multiple match
+4. For multi-series data (isMultiSeries=true):
+   - If seriesCount > 5: Prefer Heatmap (2D grid is cleaner than cluttered lines)
+   - If seriesCount ≤ 5: Use LineChart (if time-based) or BarChart with "seriesKey" prop
+5. For single aggregate values: Prefer Card
+6. For percentage/completion data: Consider RadialChart or Progress
+7. For status labels: Consider Badge
+8. Table is the LAST resort — only when data is too heterogeneous for any chart
 
-## Selection Priority (follow this order)
-1. Single aggregate value (COUNT, SUM, AVG, 1 row 1-2 cols) → Card
-2. **Two categorical dimensions + 1 numeric (>5 series)** → Heatmap (BEST for grids like user×month)
-3. Multi-series data (2 grouping dimensions, ≤5 series) → LineChart/BarChart WITH seriesKey  
-4. Single-series temporal data (date/month + numbers) → LineChart
-5. Category comparison (1 label + values, ≤8 rows) → PieChart
-6. Category comparison (1 label + values, 9-50 rows) → BarChart
-7. Large datasets (>50 rows) or fallback → Table
-
-## Props Format by Component Type
-
-For Card:
-{ "title": "label", "value": the_value, "description": "context" }
-
-For BarChart/LineChart/AreaChart (single-series):
-{ "categoryKey": "x_axis_column", "dataKey": "numeric_column" }
-
-For BarChart/LineChart/AreaChart (MULTI-SERIES - ≤5 series):
-{ 
-  "categoryKey": "x_axis_column (usually time/date)", 
-  "dataKey": "numeric_column",
-  "seriesKey": "column_that_groups_series (e.g., user_name, category)"
-}
-
-For Heatmap (MULTI-SERIES - >5 series, 2D grid):
-{
-  "xKey": "column_for_x_axis (e.g., month, date)",
-  "yKey": "column_for_y_axis (e.g., user_name, product)",
-  "valueKey": "numeric_column_for_color_intensity"
-}
-
-For PieChart:
-{ "nameKey": "column_for_labels", "dataKey": "column_for_values" }
-
-For Table:
-{ "columns": [{"Header": "Display Name", "accessor": "column_name"}], "caption": "description" }
+## Props Format Examples (use these as reference for the correct prop shape)
+${propsFormatSection}
 
 ## Rules
 1. DO NOT include "data" in props - it will be injected automatically
 2. Use exact column names from the sample data
 3. Output ONLY valid JSON, no explanation, no markdown code blocks
-4. STRONGLY prefer Heatmap when isMultiSeries=true and seriesCount>5
-5. Heatmap is IDEAL for queries like "each user spends per month" or "sales by product per region"
+4. For multi-series BarChart/LineChart/AreaChart, include "seriesKey" prop
 
 ## Required Output Format (JSON only)
 {
   "title": "A descriptive title for this visualization",
   "description": "Brief explanation of what the data shows",
   "component": {
-    "type": "Card" | "BarChart" | "LineChart" | "AreaChart" | "PieChart" | "Heatmap" | "Table",
+    "type": ${validTypeEnum},
     "props": { ... }
   }
 }
@@ -309,15 +294,15 @@ JSON Output:`;
       throw new Error('Invalid UI specification: missing required fields');
     }
 
-    // Validate component type
+    // Validate component type against metadata (dynamic, not hardcoded)
     const validTypes = componentMetadata.map(c => c.component);
     if (!validTypes.includes(uiSpec.component.type)) {
       throw new Error(`Invalid component type: ${uiSpec.component.type}. Must be one of: ${validTypes.join(', ')}`);
     }
 
-    // SPECIAL HANDLING: Inject full data for data-driven components
-    const dataComponents = ['Table', 'BarChart', 'LineChart', 'AreaChart', 'PieChart', 'RadialChart', 'Heatmap'];
-    if (dataComponents.includes(uiSpec.component.type)) {
+    // METADATA-DRIVEN data injection: check needs_data from component metadata
+    const componentMeta = componentMetadata.find(c => c.component === uiSpec.component.type);
+    if (componentMeta?.needs_data) {
       uiSpec.component.props.data = rows;
       
       // For Table: ensure columns are present
@@ -379,4 +364,3 @@ JSON Output:`;
     throw new Error('Failed to generate UI specification: ' + error.message);
   }
 }
-

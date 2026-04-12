@@ -4,11 +4,17 @@
     "description": "A container for a single key metric or KPI.",
     "use_when": "Displaying a single aggregate value like COUNT, SUM, AVG, or a single row with 1-2 columns.",
     "priority": 1,
+    "needs_data": false,
     "expects": {
       "title": "string (required) - The label of the metric",
       "value": "string/number (required) - The main value to display",
       "description": "string (optional) - Additional context",
       "trend": "number (optional) - Percentage change"
+    },
+    "props_example": {
+      "title": "Total Revenue",
+      "value": 125000,
+      "description": "Q3 2025 fiscal year"
     }
   },
   {
@@ -16,10 +22,16 @@
     "description": "A vertical bar chart for comparing values across categories.",
     "use_when": "Comparing discrete categories (e.g., sales by product, users by country). Best when you have 1 label column + 1 or more numeric columns.",
     "priority": 2,
+    "needs_data": true,
     "expects": {
       "categoryKey": "string (required) - Column name for category labels (x-axis)",
       "dataKey": "string or array (required) - Column name(s) for bar values (numeric)",
       "seriesKey": "string (optional) - Column name to group data into multiple bar series"
+    },
+    "props_example": {
+      "categoryKey": "product_name",
+      "dataKey": "total_sales",
+      "seriesKey": "region"
     }
   },
   {
@@ -27,10 +39,16 @@
     "description": "A line chart showing trends over a continuous dimension.",
     "use_when": "Showing trends over time or sequences. Best when x-axis is temporal (date, month, year) and you have 1+ numeric value columns.",
     "priority": 2,
+    "needs_data": true,
     "expects": {
       "categoryKey": "string (required) - Column name for x-axis (usually date/time)",
       "dataKey": "string or array (required) - Column name(s) for line values",
       "seriesKey": "string (optional) - Column name to group data into multiple line series"
+    },
+    "props_example": {
+      "categoryKey": "month",
+      "dataKey": "revenue",
+      "seriesKey": "department"
     }
   },
   {
@@ -38,10 +56,15 @@
     "description": "A filled area chart emphasizing volume and magnitude over time.",
     "use_when": "Showing cumulative totals or emphasizing the magnitude of trends. Similar to LineChart but with filled areas.",
     "priority": 2,
+    "needs_data": true,
     "expects": {
       "categoryKey": "string (required) - Column name for x-axis",
       "dataKey": "string or array (required) - Column name(s) for area values",
       "seriesKey": "string (optional) - Column name to group data into multiple area series"
+    },
+    "props_example": {
+      "categoryKey": "quarter",
+      "dataKey": "cumulative_revenue"
     }
   },
   {
@@ -49,9 +72,14 @@
     "description": "A circular chart showing proportions of a whole.",
     "use_when": "Showing how parts relate to a whole. Best for 2-8 categories. Use when the question asks about 'distribution', 'share', or 'breakdown'.",
     "priority": 2,
+    "needs_data": true,
     "expects": {
       "nameKey": "string (required) - Column name for slice labels",
       "dataKey": "string (required) - Column name for slice values (numeric)"
+    },
+    "props_example": {
+      "nameKey": "category",
+      "dataKey": "amount"
     }
   },
   {
@@ -59,10 +87,16 @@
     "description": "A circular gauge for showing progress or single metrics as percentages.",
     "use_when": "Displaying goal completion, percentages, or comparing 1-5 metrics. Best when values are between 0-100.",
     "priority": 2,
+    "needs_data": true,
     "expects": {
       "nameKey": "string (required) - Column name for metric labels",
       "dataKey": "string (required) - Column name for metric values",
       "maxValue": "number (optional) - Maximum value for scale (default: 100)"
+    },
+    "props_example": {
+      "nameKey": "metric_name",
+      "dataKey": "completion_rate",
+      "maxValue": 100
     }
   },
   {
@@ -70,9 +104,14 @@
     "description": "A data grid for detailed listings when charts are not appropriate.",
     "use_when": "ONLY use when data has many heterogeneous columns that don't form a clear pattern for charts, or when user explicitly asks for a 'list' or 'details'.",
     "priority": 3,
+    "needs_data": true,
     "expects": {
       "columns": "array of {Header, accessor} - Auto-generated from fields",
       "caption": "string (optional) - Table description"
+    },
+    "props_example": {
+      "columns": [{"Header": "Name", "accessor": "name"}, {"Header": "Amount", "accessor": "amount"}],
+      "caption": "Transaction details"
     }
   },
   {
@@ -80,9 +119,14 @@
     "description": "A linear progress bar for single percentage values.",
     "use_when": "Visualizing a single percentage or completion rate (0-100).",
     "priority": 1,
+    "needs_data": false,
     "expects": {
-      "value": "number (required) - Value between 0 and  100",
+      "value": "number (required) - Value between 0 and 100",
       "label": "string (optional) - Label"
+    },
+    "props_example": {
+      "value": 75,
+      "label": "Task Completion"
     }
   },
   {
@@ -90,9 +134,14 @@
     "description": "A small chip for status or category display.",
     "use_when": "Highlighting a status (Active/Inactive), category, or short text value from a single-row, single-column result.",
     "priority": 1,
+    "needs_data": false,
     "expects": {
       "label": "string (required) - The text to display",
       "variant": "string (optional) - 'default', 'secondary', 'destructive', 'outline'"
+    },
+    "props_example": {
+      "label": "Active",
+      "variant": "default"
     }
   },
   {
@@ -100,10 +149,16 @@
     "description": "A 2D grid visualization using color intensity to show values across two categorical dimensions.",
     "use_when": "Displaying data with TWO categorical dimensions and one numeric value. Perfect for user×month, product×region, or any matrix-style data. Use when you have many series (>5) that would clutter a line chart.",
     "priority": 2,
+    "needs_data": true,
     "expects": {
       "xKey": "string (required) - Column name for x-axis categories (e.g., month, date)",
       "yKey": "string (required) - Column name for y-axis categories (e.g., user_name, product)",
       "valueKey": "string (required) - Column name for the numeric value (color intensity)"
+    },
+    "props_example": {
+      "xKey": "month",
+      "yKey": "user_name",
+      "valueKey": "total_amount"
     }
   }
 ]
