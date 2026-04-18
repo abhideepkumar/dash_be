@@ -220,21 +220,29 @@ export async function processUserQuery(query, sessionId, topK = 5, onStep = null
   }
   
   try {
-    const enhancedResult = await enhanceQuery(query, history, dbContext);
-    
-    if (!enhancedResult.answerable) {
-       if (onStep) onStep('enhance', { query }, { cannotAnswer: true, reason: enhancedResult.reason }, Date.now() - stepStart);
-       return {
-         originalQuery: query,
-         cannotAnswer: true,
-         reason: enhancedResult.reason,
-         suggestions: enhancedResult.suggestions || []
-       };
-    }
+    if (history.length === 0) {
+      // Only run enhanceQuery for fresh (non-follow-up) queries.
+      // Follow-ups skip this step — the original query already passed schema validation.
+      const enhancedResult = await enhanceQuery(query, [], dbContext);
 
-    enhancedQuery = enhancedResult.enhancedQuery || query;
-    const metrics = enhancedResult.usage ? { tokens: enhancedResult.usage, cost: enhancedResult.costDetails?.estimatedCost } : null;
-    if (onStep) onStep('enhance', { query, historyTurns: history.length }, { enhancedQuery }, Date.now() - stepStart, null, metrics);
+      if (!enhancedResult.answerable) {
+        if (onStep) onStep('enhance', { query }, { cannotAnswer: true, reason: enhancedResult.reason }, Date.now() - stepStart);
+        return {
+          originalQuery: query,
+          cannotAnswer: true,
+          reason: enhancedResult.reason,
+          suggestions: enhancedResult.suggestions || []
+        };
+      }
+
+      enhancedQuery = enhancedResult.enhancedQuery || query;
+      const metrics = enhancedResult.usage ? { tokens: enhancedResult.usage, cost: enhancedResult.costDetails?.estimatedCost } : null;
+      if (onStep) onStep('enhance', { query, historyTurns: 0 }, { enhancedQuery }, Date.now() - stepStart, null, metrics);
+    } else {
+      // Follow-up query: trust the user, skip answerability check.
+      enhancedQuery = query;
+      if (onStep) onStep('enhance', { query, skipped: true, reason: 'follow-up query — bypassing schema validation' }, { enhancedQuery }, 0);
+    }
   } catch (err) {
     if (onStep) onStep('enhance', { query }, null, Date.now() - stepStart, err.message);
     // Non-fatal: fall back to raw query
