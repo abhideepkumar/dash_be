@@ -107,7 +107,10 @@ function analyzeDataShape(rows, fields) {
   // Build data pattern tags (descriptive, not prescriptive)
   const dataPatterns = [];
   
-  if (rowCount === 1 && (numericColumns.length <= 2 && categoryColumns.length <= 2)) {
+  if (rowCount === 1 && numericColumns.length >= 2) {
+    // Single row with multiple numeric columns → StatGrid (multi-KPI overview)
+    dataPatterns.push('single_row_multi_column');
+  } else if (rowCount === 1 && (numericColumns.length <= 2 && categoryColumns.length <= 2)) {
     dataPatterns.push('single_value');
   }
   if (isTimeSeries) {
@@ -124,11 +127,27 @@ function analyzeDataShape(rows, fields) {
     dataPatterns.push('category_comparison');
     if (rowCount <= 8) dataPatterns.push('few_categories');
     if (rowCount > 8 && rowCount <= 50) dataPatterns.push('moderate_categories');
+    if (rowCount > 8) dataPatterns.push('many_categories'); // TreeMap candidate
   }
   if (numericColumns.length >= 1) {
     dataPatterns.push('has_numeric');
     const allBetween0and100 = numericColumns.every(c => c.min >= 0 && c.max <= 100);
     if (allBetween0and100 && rowCount <= 5) dataPatterns.push('percentage_range');
+  }
+  // Two numeric columns with no clear series → ScatterChart or ComboChart
+  if (numericColumns.length >= 2 && categoryColumns.length <= 1 && !isMultiSeries && rowCount > 1) {
+    if (isTimeSeries || (categoryColumns.length === 1)) {
+      dataPatterns.push('dual_numeric_time'); // ComboChart candidate
+    } else {
+      dataPatterns.push('two_numeric_columns'); // ScatterChart candidate
+    }
+  }
+  // Ordered-stages heuristic: single category + single numeric + monotonically decreasing values
+  if (categoryColumns.length === 1 && numericColumns.length === 1 && rowCount >= 3 && rowCount <= 12) {
+    const numKey = numericColumns[0].name;
+    const vals = rows.map(r => Number(r[numKey])).filter(v => !isNaN(v));
+    const isDecreasing = vals.every((v, i) => i === 0 || v <= vals[i - 1]);
+    if (isDecreasing) dataPatterns.push('ordered_stages'); // FunnelChart candidate
   }
   if (rowCount > 50) {
     dataPatterns.push('large_dataset');
@@ -233,13 +252,24 @@ ${componentDescriptions}
 1. Look at the **Data patterns** above
 2. Match them against each component's **"Use when"** criteria
 3. Prefer components with lower **priority** numbers when multiple match
-4. For multi-series data (isMultiSeries=true):
-   - If seriesCount > 5: Prefer Heatmap (2D grid is cleaner than cluttered lines)
-   - If seriesCount ≤ 5: Use LineChart (if time-based) or BarChart with "seriesKey" prop
-5. For single aggregate values: Prefer Card
-6. For percentage/completion data: Consider RadialChart or Progress
-7. For status labels: Consider Badge
-8. Table is the LAST resort — only when data is too heterogeneous for any chart
+4. **Pattern → Component guidance:**
+   - \`single_row_multi_column\` → **StatGrid** (multiple KPI tiles from one summary row)
+   - \`single_value\` → **Card** (single KPI)
+   - \`two_numeric_columns\` → **ScatterChart** (correlation between two numeric vars)
+   - \`dual_numeric_time\` → **ComboChart** (two metrics on dual axes over time/category)
+   - \`ordered_stages\` → **FunnelChart** (pipeline/conversion stages)
+   - \`many_categories\` → **TreeMap** (proportional area for many categories)
+   - \`few_categories\` + part-to-whole question → **PieChart**
+   - \`high_cardinality_series\` or \`two_dimensions\` → **Heatmap**
+   - \`low_cardinality_series\` + time → **LineChart** with seriesKey
+   - \`low_cardinality_series\` + category → **BarChart** with seriesKey
+   - \`time_series\` (single series) → **LineChart** or **AreaChart**
+   - \`category_comparison\` (single series) → **BarChart**
+   - \`percentage_range\` → **RadialChart** or **GaugeChart** (if question mentions target)
+5. For percentage/completion **against a target**: Use **GaugeChart**
+6. P&L, variance, bridge analysis: Use **WaterfallChart**
+7. For status labels: Consider **Badge**
+8. **Table is the LAST resort** — only when data is too heterogeneous for any chart
 
 ## Props Format Examples (use these as reference for the correct prop shape)
 ${propsFormatSection}
@@ -264,7 +294,7 @@ JSON Output:`;
 
   try {
     // Generate UI spec and insights in parallel for better performance
-    const [uiResponse, insights] = await Promise.all([
+    const [uiResponse, insightsResponse] = await Promise.all([
       callLLM(
         [{ role: 'user', content: prompt }],
         { temperature: 0.1, max_tokens: 2000 }
@@ -273,6 +303,24 @@ JSON Output:`;
     ]);
 
     let content = uiResponse.content.trim();
+    
+    // Extract and combine metrics
+    let combinedMetrics = null;
+    const uiMetrics = uiResponse.usage ? { tokens: uiResponse.usage, cost: uiResponse.costDetails?.estimatedCost } : null;
+    const insightMetrics = insightsResponse.metrics;
+    
+    if (uiMetrics || insightMetrics) {
+       combinedMetrics = {
+          tokens: {
+             promptTokens: (uiMetrics?.tokens?.promptTokens || 0) + (insightMetrics?.tokens?.promptTokens || 0),
+             completionTokens: (uiMetrics?.tokens?.completionTokens || 0) + (insightMetrics?.tokens?.completionTokens || 0),
+             totalTokens: (uiMetrics?.tokens?.totalTokens || 0) + (insightMetrics?.tokens?.totalTokens || 0),
+          },
+          cost: (uiMetrics?.cost || 0) + (insightMetrics?.cost || 0)
+       };
+    }
+    
+    const insights = insightsResponse.data || [];
     
     // Clean up any markdown code blocks if present
     if (content.startsWith('```json')) {
@@ -313,8 +361,51 @@ JSON Output:`;
       }
     }
 
+    // POST-PROCESSING for StatGrid: auto-build metrics array from single-row result
+    // The LLM sets type=StatGrid but may not know the actual values — inject them
+    if (uiSpec.component.type === 'StatGrid' && rows.length > 0) {
+      const firstRow = rows[0];
+      const numericFields = fields.filter(f => {
+        const v = firstRow[f.name];
+        return v !== null && v !== undefined && !isNaN(Number(v));
+      });
+      // If LLM didn't produce a valid metrics array, auto-build it
+      if (!Array.isArray(uiSpec.component.props.metrics) || uiSpec.component.props.metrics.length === 0) {
+        uiSpec.component.props.metrics = numericFields.map(f => ({
+          title: f.name.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase()),
+          value: firstRow[f.name],
+          description: null,
+          trend: null,
+        }));
+      } else {
+        // Merge LLM-provided titles/descriptions with actual values from rows
+        uiSpec.component.props.metrics = uiSpec.component.props.metrics.map(metric => ({
+          ...metric,
+          value: metric.value !== undefined ? metric.value : firstRow[metric.valueKey || metric.title?.toLowerCase().replace(/ /g, '_')],
+        }));
+      }
+    }
+
+    // POST-PROCESSING for GaugeChart: inject numeric value from rows if not set
+    if (uiSpec.component.type === 'GaugeChart' && rows.length > 0) {
+      const props = uiSpec.component.props;
+      if (props.value === undefined || props.value === null) {
+        // Take first numeric field as the value
+        const firstRow = rows[0];
+        const numericField = fields.find(f => !isNaN(Number(firstRow[f.name])) && firstRow[f.name] !== null);
+        if (numericField) props.value = Number(firstRow[numericField.name]);
+      }
+      // Ensure max is set to a reasonable default
+      if (props.max === undefined || props.max === null) {
+        props.max = 100;
+      }
+    }
+
     // Add insights to the response
     uiSpec.insights = insights;
+    if (combinedMetrics) {
+      uiSpec.metrics = combinedMetrics;
+    }
 
     console.log(`[UI GENERATOR] Selected component: ${uiSpec.component.type} with ${insights.length} insights for query: "${originalQuery}"`);
     

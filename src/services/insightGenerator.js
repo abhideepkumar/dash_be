@@ -318,7 +318,7 @@ Return ONLY a valid JSON array, no markdown:
 [{"type":"...","priority":"...","text":"...","evidence":"..."}]`;
 
   try {
-    const { content: raw } = await callLLM(
+    const { content: raw, usage, costDetails } = await callLLM(
       [{ role: 'user', content: prompt }],
       { temperature: 0.3, max_tokens: 800 }
     );
@@ -332,17 +332,18 @@ Return ONLY a valid JSON array, no markdown:
 
     const insights = JSON.parse(cleaned);
     console.log(`[INSIGHTS] LLM generated ${insights.length} insights`);
-    return insights;
+    const metrics = usage ? { tokens: usage, cost: costDetails?.estimatedCost } : null;
+    return { data: insights, metrics };
 
   } catch (error) {
     console.error('[INSIGHTS] LLM synthesis failed:', error.message);
     // Fallback insight
-    return [{
+    return { data: [{
       type: 'summary',
       priority: 'medium',
       text: `Analysis of ${classification.rowCount} records for "${originalQuery}".`,
       evidence: `${classification.metricColumns.length} metrics, ${classification.dimensionColumns.length} dimensions`
-    }];
+    }], metrics: null };
   }
 }
 
@@ -453,12 +454,12 @@ export async function generateInsights({ originalQuery, rows, fields, chartType 
   // Skip if insufficient data
   if (!rows || rows.length === 0) {
     console.log('[INSIGHTS] No data, skipping insights');
-    return [{
+    return { data: [{
       type: 'info',
       priority: 'low',
       text: 'No data available for analysis.',
       evidence: '0 rows returned'
-    }];
+    }], metrics: null };
   }
   
   try {
@@ -475,18 +476,18 @@ export async function generateInsights({ originalQuery, rows, fields, chartType 
     console.log(`[INSIGHTS] Stage 3 - Generated ${rawInsights.length} raw insights`);
     
     // Stage 4: Prioritize
-    const prioritized = prioritizeInsights(rawInsights);
+    const prioritized = prioritizeInsights(rawInsights.data);
     console.log(`[INSIGHTS] Stage 4 - Prioritized, returning top 4`);
     
-    return prioritized.slice(0, 4);
+    return { data: prioritized.slice(0, 4), metrics: rawInsights.metrics };
     
   } catch (error) {
     console.error('[INSIGHTS] Pipeline failed:', error.message);
-    return [{
+    return { data: [{
       type: 'error',
       priority: 'low',
       text: 'Unable to generate insights for this data.',
       evidence: error.message
-    }];
+    }], metrics: null };
   }
 }

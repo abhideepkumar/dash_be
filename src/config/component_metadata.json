@@ -18,6 +18,43 @@
     }
   },
   {
+    "component": "StatGrid",
+    "description": "A responsive grid of KPI cards showing multiple metrics simultaneously.",
+    "use_when": "Query returns a single row with 2 to 8 numeric columns, OR the user explicitly asks for a 'summary', 'overview', 'dashboard', or 'all metrics'. Do NOT use if there is only 1 numeric column (use Card instead). Each column becomes a separate KPI tile.",
+    "priority": 1,
+    "needs_data": false,
+    "expects": {
+      "metrics": "array of {title, value, description, trend} — one object per KPI to display"
+    },
+    "props_example": {
+      "metrics": [
+        { "title": "Total Revenue", "value": 125000, "description": "Q3 FY2025", "trend": 12.5 },
+        { "title": "Active Users", "value": 4821, "trend": -2.1 },
+        { "title": "Avg Order Value", "value": 89.50 }
+      ]
+    }
+  },
+  {
+    "component": "GaugeChart",
+    "description": "A semicircular gauge showing a single metric against a target/max with color-coded zones (red/yellow/green).",
+    "use_when": "Displaying a single value that needs to be evaluated against a target or maximum. Use for goal completion, budget utilization, SLA compliance. Best when the question mentions 'target', 'goal', 'how close', 'vs target', 'completion rate'.",
+    "priority": 1,
+    "needs_data": false,
+    "expects": {
+      "value": "number (required) - current value",
+      "max": "number (required) - maximum or target value",
+      "min": "number (optional) - minimum of scale (default: 0)",
+      "label": "string (optional) - metric label",
+      "unit": "string (optional) - unit suffix like '%', '$', 'ms'"
+    },
+    "props_example": {
+      "value": 78,
+      "max": 100,
+      "label": "Q3 Revenue Goal",
+      "unit": "%"
+    }
+  },
+  {
     "component": "BarChart",
     "description": "A vertical bar chart for comparing values across categories.",
     "use_when": "Comparing discrete categories (e.g., sales by product, users by country). Best when you have 1 label column + 1 or more numeric columns.",
@@ -68,9 +105,94 @@
     }
   },
   {
+    "component": "ComboChart",
+    "description": "A dual-axis chart combining bars and a line — ideal for comparing volume against a rate or ratio on different scales.",
+    "use_when": "Data has one time or category axis and EXACTLY TWO numeric columns with different scales or units. Use when the question asks to 'overlay', 'compare X alongside Y', or shows both absolute values AND rates (e.g., revenue + growth rate, orders + average order value, headcount + satisfaction score). Do NOT use if both columns are on similar scales — use BarChart or LineChart instead.",
+    "priority": 2,
+    "needs_data": true,
+    "expects": {
+      "categoryKey": "string (required) - x-axis column (time or category)",
+      "barKey": "string (required) - column mapped to bars (left y-axis)",
+      "lineKey": "string (required) - column mapped to line (right y-axis)",
+      "barLabel": "string (optional) - legend label for the bars",
+      "lineLabel": "string (optional) - legend label for the line"
+    },
+    "props_example": {
+      "categoryKey": "month",
+      "barKey": "total_revenue",
+      "lineKey": "growth_rate",
+      "barLabel": "Revenue",
+      "lineLabel": "Growth %"
+    }
+  },
+  {
+    "component": "ScatterChart",
+    "description": "A scatter plot for visualizing correlations and relationships between two numeric variables. Supports bubble sizing for a third variable.",
+    "use_when": "Data has exactly 2 or more numeric columns with no clear time axis or ordering. Best for correlation analysis, outlier detection, and positioning charts. Use when the question asks to 'compare X vs Y', 'plot A against B', 'correlation between', 'relationship between', or 'scatter'.",
+    "priority": 2,
+    "needs_data": true,
+    "expects": {
+      "xKey": "string (required) - column for x-axis (numeric)",
+      "yKey": "string (required) - column for y-axis (numeric)",
+      "labelKey": "string (optional) - column for point labels (category name)",
+      "sizeKey": "string (optional) - column for bubble radius (creates a BubbleChart)"
+    },
+    "props_example": {
+      "xKey": "total_spend",
+      "yKey": "order_count",
+      "labelKey": "customer_name"
+    }
+  },
+  {
+    "component": "WaterfallChart",
+    "description": "A bridge/waterfall chart showing how sequential positive and negative changes contribute to a final total.",
+    "use_when": "Data represents a sequence of incremental changes that sum to a total or show variance. Use for financial P&L bridges, budget variance analysis, revenue decomposition, or cost breakdowns. Columns should include a step label and a signed numeric change value (positive or negative).",
+    "priority": 2,
+    "needs_data": true,
+    "expects": {
+      "categoryKey": "string (required) - column for step or segment labels",
+      "valueKey": "string (required) - column for numeric change value (can be negative for decreases)"
+    },
+    "props_example": {
+      "categoryKey": "segment",
+      "valueKey": "variance"
+    }
+  },
+  {
+    "component": "FunnelChart",
+    "description": "A funnel chart showing ordered stages with progressively decreasing values.",
+    "use_when": "Data has ordered pipeline stages and a numeric count or value at each stage. Use for sales funnels, onboarding flows, marketing conversion, or any pipeline where volume decreases at each step. Use when the question mentions 'funnel', 'pipeline', 'stages', 'conversion', 'drop-off', or 'journey'.",
+    "priority": 2,
+    "needs_data": true,
+    "expects": {
+      "stageKey": "string (required) - column for stage or step labels (ordered)",
+      "valueKey": "string (required) - column for the count or value at each stage"
+    },
+    "props_example": {
+      "stageKey": "stage_name",
+      "valueKey": "user_count"
+    }
+  },
+  {
+    "component": "TreeMap",
+    "description": "A nested rectangle chart showing proportional areas for categories — best for many categories.",
+    "use_when": "Showing part-to-whole relationships with MANY categories (more than 8). Use instead of PieChart when there are too many slices to read clearly. Best for department spend breakdown, revenue by SKU, user distribution across many segments, or any hierarchical proportion.",
+    "priority": 2,
+    "needs_data": true,
+    "expects": {
+      "nameKey": "string (required) - column for category label",
+      "valueKey": "string (required) - column for numeric value (determines tile size)",
+      "parentKey": "string (optional) - column for parent group, enables 2-level hierarchy"
+    },
+    "props_example": {
+      "nameKey": "department",
+      "valueKey": "total_spend"
+    }
+  },
+  {
     "component": "PieChart",
     "description": "A circular chart showing proportions of a whole.",
-    "use_when": "Showing how parts relate to a whole. Best for 2-8 categories. Use when the question asks about 'distribution', 'share', or 'breakdown'.",
+    "use_when": "Showing how parts relate to a whole. Best for 2-8 categories. Use when the question asks about 'distribution', 'share', or 'breakdown'. If there are more than 8 categories, prefer TreeMap instead.",
     "priority": 2,
     "needs_data": true,
     "expects": {

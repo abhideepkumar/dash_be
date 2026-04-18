@@ -2,8 +2,9 @@ import express from 'express';
 import User from '../models/User.js';
 import DbConfig from '../models/DbConfig.js';
 import { authenticateToken } from '../middleware/auth.js';
-import { decryptDbConfig, maskValue, decrypt } from '../utils/encryption.js';
+import { encryptDbConfig, decryptDbConfig, maskValue, decrypt } from '../utils/encryption.js';
 import { triggerAsyncSync, getSyncStatus } from '../services/syncService.js';
+import { testConnection } from '../config/db.js';
 
 const router = express.Router();
 
@@ -151,6 +152,75 @@ router.get('/sync-status', async (req, res) => {
     return res.status(500).json({
       success: false,
       error: 'Failed to get sync status'
+    });
+  }
+});
+
+/**
+ * POST /api/user/connect
+ * Save database configuration and trigger sync
+ */
+router.post('/connect', async (req, res) => {
+  try {
+    const { host, port, database, user, password } = req.body;
+
+    if (!host || !database || !user || !password) {
+      return res.status(400).json({
+        success: false,
+        error: 'Complete database configuration is required (host, database, user, password)'
+      });
+    }
+
+    const dbConfigPlain = { host, port: port || 5432, database, user, password };
+    
+    // 1. Test connection first
+    console.log(`[USER] Testing connection for user: ${req.user.email}`);
+    const testResult = await testConnection(dbConfigPlain);
+    
+    if (!testResult.success) {
+      return res.status(400).json({
+        success: false,
+        error: 'Connection test failed: ' + testResult.message
+      });
+    }
+
+    // 2. Encrypt and save config
+    const encryptedConfig = encryptDbConfig(dbConfigPlain);
+    
+    let dbConfig = await DbConfig.findOne({ userId: req.user.userId });
+    
+    if (dbConfig) {
+      // Update existing
+      Object.assign(dbConfig, {
+        ...encryptedConfig,
+        syncStatus: 'pending',
+        updatedAt: new Date()
+      });
+      await dbConfig.save();
+    } else {
+      // Create new
+      dbConfig = await DbConfig.create({
+        userId: req.user.userId,
+        ...encryptedConfig,
+        syncStatus: 'pending'
+      });
+    }
+
+    console.log(`[USER] Saved DB config for user: ${req.user.email}`);
+
+    // 3. Trigger async sync
+    triggerAsyncSync(req.user.userId, dbConfig._id.toString());
+
+    return res.json({
+      success: true,
+      message: 'Database connected and sync started',
+      syncStatus: 'pending'
+    });
+  } catch (error) {
+    console.error('[USER] Connect error:', error.message);
+    return res.status(500).json({
+      success: false,
+      error: 'Failed to save database configuration: ' + error.message
     });
   }
 });

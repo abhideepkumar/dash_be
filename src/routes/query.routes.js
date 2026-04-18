@@ -107,8 +107,8 @@ router.post('/generate', authenticateToken, async (req, res) => {
     const requestId = await createLog(userId, query, sessionId, history);
 
     // Step logging callback
-    const onStep = async (stepName, input, output, durationMs, error = null) => {
-      await logStep(requestId, stepName, input, output, error, durationMs);
+    const onStep = async (stepName, input, output, durationMs, error = null, metrics = null) => {
+      await logStep(requestId, stepName, input, output, error, durationMs, metrics);
     };
 
     try {
@@ -280,8 +280,14 @@ router.post('/visualize', authenticateToken, async (req, res) => {
           { query: originalQuery, rowCount: rows.length, fieldCount: fields.length },
           { uiType: uiSpec?.type, componentCount: uiSpec?.components?.length || 1 },
           null,
-          durationMs
+          durationMs,
+          uiSpec?.metrics || null
         );
+
+        // Delete metrics from uiSpec before sending to client to keep it clean (optional, keeping it is also fine)
+        if (uiSpec?.metrics) {
+           delete uiSpec.metrics;
+        }
 
         // Complete the log
         await completeLog(logRequestId, 'completed', {

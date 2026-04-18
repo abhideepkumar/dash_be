@@ -41,8 +41,9 @@ export async function createLog(userId, query, sessionId, history = []) {
  * @param {object} output - Output data from this step
  * @param {string} error - Error message if step failed
  * @param {number} durationMs - Duration in milliseconds
+ * @param {object} metrics - Additional metrics like token usage and cost
  */
-export async function logStep(requestId, stepName, input, output, error = null, durationMs = 0) {
+export async function logStep(requestId, stepName, input, output, error = null, durationMs = 0, metrics = null) {
   const step = {
     name: stepName,
     startedAt: new Date(Date.now() - durationMs),
@@ -50,6 +51,7 @@ export async function logStep(requestId, stepName, input, output, error = null, 
     durationMs,
     input: sanitizeForMongo(input),
     output: sanitizeForMongo(output),
+    metrics,
     error
   };
   

@@ -40,6 +40,35 @@ export class LLMEmptyResponseError extends Error {
 }
 
 // ─────────────────────────────────────────────
+// Cost Calculation
+// ─────────────────────────────────────────────
+
+const PRICING = {
+  // Estimated prices per 1M tokens in USD
+  'llama-3.3-70b-versatile': { prompt: 0.59, completion: 0.79 },
+  'llama3-70b-8192': { prompt: 0.59, completion: 0.79 },
+  'llama3-8b-8192': { prompt: 0.05, completion: 0.08 },
+  'google/gemma-4-31b-it': { prompt: 0.20, completion: 0.20 },
+  'google/gemma-2-9b-it': { prompt: 0.20, completion: 0.20 },
+  'meta/llama-3.1-70b-instruct': { prompt: 0.88, completion: 0.88 },
+  'default': { prompt: 0.50, completion: 0.50 }
+};
+
+export function calculateCost(model, usage) {
+  if (!usage) return 0;
+  const rates = PRICING[model] || PRICING['default'];
+  const promptCost = ((usage.promptTokens || 0) / 1000000) * rates.prompt;
+  const completionCost = ((usage.completionTokens || 0) / 1000000) * rates.completion;
+  return promptCost + completionCost;
+}
+
+export function estimateTokens(text) {
+  // Rough estimate: 1 token ~= 4 chars (standard rule of thumb for English text)
+  if (!text) return 0;
+  return Math.ceil(text.length / 4);
+}
+
+// ─────────────────────────────────────────────
 // Provider Config Resolution
 // ─────────────────────────────────────────────
 
@@ -142,10 +171,28 @@ async function callGroq(messages, opts = {}) {
       throw new LLMEmptyResponseError('[LLM][Groq] Received empty content in response');
     }
 
+    const rawUsage = response.usage || {};
+    const usage = {
+      promptTokens: rawUsage.prompt_tokens || 0,
+      completionTokens: rawUsage.completion_tokens || 0,
+      totalTokens: rawUsage.total_tokens || 0
+    };
+    
+    // Fallback estimation if usage is not provided
+    if (usage.totalTokens === 0) {
+      const promptText = messages.map(m => m.content).join('\n');
+      usage.promptTokens = estimateTokens(promptText);
+      usage.completionTokens = estimateTokens(content);
+      usage.totalTokens = usage.promptTokens + usage.completionTokens;
+    }
+
+    const estimatedCost = calculateCost(response.model || model, usage);
+
     return {
       content,
       model: response.model || model,
-      usage: response.usage || {},
+      usage,
+      costDetails: { estimatedCost }
     };
   } catch (err) {
     // Re-classify known HTTP error codes
@@ -275,7 +322,20 @@ async function callNvidiaNim(messages, opts = {}) {
           return;
         }
 
-        resolve({ content, model: finalModel });
+        const promptText = messages.map(m => m.content).join('\n');
+        const promptTokens = estimateTokens(promptText);
+        const completionTokens = estimateTokens(content);
+        const totalTokens = promptTokens + completionTokens;
+        
+        const usage = { promptTokens, completionTokens, totalTokens };
+        const estimatedCost = calculateCost(finalModel, usage);
+
+        resolve({ 
+          content, 
+          model: finalModel,
+          usage,
+          costDetails: { estimatedCost }
+        });
       });
 
       response.data.on('error', (streamErr) => {
@@ -319,17 +379,25 @@ async function callNvidiaNim(messages, opts = {}) {
  * @param {number}  [opts.max_tokens]     - Max tokens to generate
  * @param {number}  [opts.top_p]          - Top-p sampling (NIM only, ignored by Groq)
  * @param {boolean} [opts.enableThinking] - Enable chain-of-thought (NIM only)
- * @returns {Promise<{ content: string, model: string, usage?: object }>}
+ * @returns {Promise<{ content: string, model: string, usage?: object, costDetails?: object }>}
  */
 export async function callLLM(messages, opts = {}) {
   const config = getConfig();
 
   if (config.provider === 'groq') {
-    return callGroq(messages, opts);
+    const result = await callGroq(messages, opts);
+    if (result.usage && result.costDetails) {
+      console.log(`[LLM][Groq] Tokens: ${result.usage.totalTokens} (P:${result.usage.promptTokens}, C:${result.usage.completionTokens}) | Est. Cost: $${result.costDetails.estimatedCost.toFixed(6)}`);
+    }
+    return result;
   }
 
   if (config.provider === 'nvidia_nim') {
-    return callNvidiaNim(messages, opts);
+    const result = await callNvidiaNim(messages, opts);
+    if (result.usage && result.costDetails) {
+      console.log(`[LLM][NIM] Tokens (Est): ${result.usage.totalTokens} (P:${result.usage.promptTokens}, C:${result.usage.completionTokens}) | Est. Cost: $${result.costDetails.estimatedCost.toFixed(6)}`);
+    }
+    return result;
   }
 
   // Unreachable given validateProviderConfig(), but guards against future additions

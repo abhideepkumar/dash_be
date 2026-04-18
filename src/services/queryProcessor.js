@@ -56,12 +56,12 @@ Rules:
 Rewritten query:`;
 
   try {
-    const { content } = await callLLM(
+    const { content, usage, costDetails } = await callLLM(
       [{ role: 'user', content: prompt }],
       { temperature: 0.3, max_tokens: 300 }
     );
     console.log(`[QUERY] Enhanced: "${query}" -> "${content}"`);
-    return content;
+    return { content, usage, costDetails };
   } catch (error) {
     console.error('[QUERY] Error enhancing query:', error.message);
     // Fallback to original query if enhancement fails
@@ -128,7 +128,7 @@ Rules:
 SQL Query:`;
 
   try {
-    const { content: rawSql } = await callLLM(
+    const { content: rawSql, usage, costDetails } = await callLLM(
       [{ role: 'user', content: prompt }],
       { temperature: 0.2, max_tokens: 500 }
     );
@@ -148,7 +148,7 @@ SQL Query:`;
     sql = sql.trim();
 
     console.log(`[QUERY] Generated SQL for: "${query}"`);
-    return sql;
+    return { sql, usage, costDetails };
   } catch (error) {
     console.error('[QUERY] Error generating SQL:', error.message);
     throw new Error('Failed to generate SQL query: ' + error.message);
@@ -171,8 +171,15 @@ export async function processUserQuery(query, sessionId, topK = 5, onStep = null
   let stepStart = Date.now();
   
   try {
-    enhancedQuery = await enhanceQuery(query, history);
-    if (onStep) onStep('enhance', { query, historyTurns: history.length }, { enhancedQuery }, Date.now() - stepStart);
+    const enhancedResult = await enhanceQuery(query, history);
+    if (typeof enhancedResult === 'object' && enhancedResult.content) {
+       enhancedQuery = enhancedResult.content;
+       const metrics = enhancedResult.usage ? { tokens: enhancedResult.usage, cost: enhancedResult.costDetails?.estimatedCost } : null;
+       if (onStep) onStep('enhance', { query, historyTurns: history.length }, { enhancedQuery }, Date.now() - stepStart, null, metrics);
+    } else {
+       enhancedQuery = enhancedResult;
+       if (onStep) onStep('enhance', { query, historyTurns: history.length }, { enhancedQuery }, Date.now() - stepStart);
+    }
   } catch (err) {
     if (onStep) onStep('enhance', { query }, null, Date.now() - stepStart, err.message);
     // Non-fatal: fall back to raw query
@@ -241,13 +248,17 @@ export async function processUserQuery(query, sessionId, topK = 5, onStep = null
   stepStart = Date.now();
   let sql;
   try {
-    sql = await generateSQL(enhancedQuery, relevantTables, history);
+    const sqlResult = await generateSQL(enhancedQuery, relevantTables, history);
+    sql = sqlResult.sql;
+    const metrics = sqlResult.usage ? { tokens: sqlResult.usage, cost: sqlResult.costDetails?.estimatedCost } : null;
     
     if (onStep) {
       onStep('sql_generate',
         { query: enhancedQuery, tableCount: relevantTables.length, historyTurns: history.length },
         { sql, sqlLength: sql.length },
-        Date.now() - stepStart
+        Date.now() - stepStart,
+        null,
+        metrics
       );
     }
   } catch (err) {

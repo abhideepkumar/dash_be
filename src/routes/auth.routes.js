@@ -54,12 +54,12 @@ router.post('/register', async (req, res) => {
       });
     }
 
-    if (!dbConfig || !dbConfig.host || !dbConfig.database || !dbConfig.user || !dbConfig.password) {
-      return res.status(400).json({
-        success: false,
-        error: 'Complete database configuration is required'
-      });
-    }
+    // Check if dbConfig is provided and complete
+    const hasFullDbConfig = dbConfig && 
+                           dbConfig.host && 
+                           dbConfig.database && 
+                           dbConfig.user && 
+                           dbConfig.password;
 
     // Check if user already exists
     const existingUser = await User.findOne({ email: email.toLowerCase().trim() });
@@ -80,19 +80,21 @@ router.post('/register', async (req, res) => {
 
     console.log(`[AUTH] Created new user: ${user.email}`);
 
-    // Store encrypted DB config
-    const encryptedConfig = encryptDbConfig(dbConfig);
-    const config = await DbConfig.create({
-      userId: user._id,
-      ...encryptedConfig,
-      syncStatus: 'pending'
-    });
+    // Store encrypted DB config if provided
+    let syncStatus = 'none';
+    if (hasFullDbConfig) {
+      const encryptedConfig = encryptDbConfig(dbConfig);
+      const config = await DbConfig.create({
+        userId: user._id,
+        ...encryptedConfig,
+        syncStatus: 'pending'
+      });
+      syncStatus = 'pending';
+      console.log(`[AUTH] Created DB config for user: ${user.email}`);
 
-    console.log(`[AUTH] Created DB config for user: ${user.email}`);
-
-    // Fire-and-forget: Start schema sync in background
-    // This returns immediately, sync happens asynchronously
-    triggerAsyncSync(user._id.toString(), config._id.toString());
+      // Fire-and-forget: Start schema sync in background
+      triggerAsyncSync(user._id.toString(), config._id.toString());
+    }
 
     // Generate token and return immediately
     const token = generateToken(user);
@@ -105,7 +107,8 @@ router.post('/register', async (req, res) => {
         id: user._id,
         createdAt: user.createdAt
       },
-      syncStatus: 'pending'
+      syncStatus,
+      hasDbConfig: hasFullDbConfig
     });
 
   } catch (error) {

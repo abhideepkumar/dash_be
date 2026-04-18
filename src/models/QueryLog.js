@@ -22,6 +22,14 @@ const stepSchema = new mongoose.Schema({
   output: {
     type: mongoose.Schema.Types.Mixed
   },
+  metrics: {
+    tokens: {
+      promptTokens: Number,
+      completionTokens: Number,
+      totalTokens: Number
+    },
+    cost: Number
+  },
   error: {
     type: String
   }
