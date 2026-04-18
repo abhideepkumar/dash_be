@@ -21,11 +21,14 @@ export function getSessionGraph(sessionId) {
 }
 
 /**
- * Enhance a user query to make it clearer and more suitable for vector search and SQL generation
+ * Enhance a user query to make it clearer and more suitable for vector search and SQL generation.
+ * Also validates whether the query is answerable given the known DB schema.
  * @param {string} query - Original user query
- * @returns {Promise<string>} Enhanced query
+ * @param {Array} history - Conversation history
+ * @param {Array} dbContext - Lightweight schema summary [{table, description, columns: [name, type]}]
+ * @returns {Promise<Object>} { answerable, enhancedQuery, reason, suggestions, usage, costDetails }
  */
-export async function enhanceQuery(query, history = []) {
+export async function enhanceQuery(query, history = [], dbContext = null) {
   // Build the history context section for the prompt
   let historySection = '';
   if (history.length > 0) {
@@ -36,36 +39,65 @@ export async function enhanceQuery(query, history = []) {
       .join('\n')}\n`;
   }
 
-  const hasHistory = history.length > 0;
-
-  const prompt = `You are a database query assistant. ${
-    hasHistory
-      ? 'Given the conversation history below and a new user query, rewrite the NEW query into a fully standalone, self-contained question that can be understood without any prior context.'
-      : 'Your task is to enhance and clarify the following natural language query to make it more precise for searching database tables and generating SQL.'
+  // Build DB schema section when available
+  let schemaSection = '';
+  if (dbContext && dbContext.length > 0) {
+    const schemaLines = dbContext.map(t => {
+      const colList = t.columns.map(c => `${c.name} (${c.type})`).join(', ');
+      return `  - ${t.table}: ${t.description}. Columns: [${colList}]`;
+    }).join('\n');
+    schemaSection = `\nDatabase Schema (ALL available tables and columns):\n${schemaLines}\n`;
   }
-${ historySection }
+
+  const prompt = `You are a database query assistant. Your task is to analyze the user's query and determine if it can be genuinely answered using the available database schema.\n${ historySection }${ schemaSection }
 New user query: "${query}"
 
 Rules:
-1. ${ hasHistory ? 'If the new query references prior context ("that", "those", "filter it", "same tables", etc.), merge the context into a single standalone question.' : 'Make the query more specific and clear.' }
-2. ${ hasHistory ? 'If the new query is already fully standalone, return it with only minor clarifications.' : 'Expand abbreviations if any.' }
-3. Add relevant database keywords that help in table/column search.
-4. Keep it as a natural language question, NOT SQL.
-5. Return ONLY the rewritten query, nothing else.
+1. If the query is a greeting, small talk, or clearly not a data request — set "answerable" to false. Provide a friendly "reason" and 3 data-related "suggestions".
+2. If the query is a data question but the required data (specific columns, statuses, or measurements) does NOT exist in the schema — set "answerable" to false. Explain specifically what is missing in "reason" and suggest 3 queries that CAN be answered using the actual schema.
+3. If the query is a valid data question that can be answered with the available schema — set "answerable" to true and provide a clear, standalone "enhancedQuery".
+4. Add relevant database keywords to the "enhancedQuery". Keep it as a natural language question, NOT SQL.
+5. Return ONLY valid JSON.
 
-Rewritten query:`;
+JSON format:
+{
+  "answerable": boolean,
+  "enhancedQuery": string | null,
+  "reason": string | null,
+  "suggestions": string[] | null
+}`;
 
   try {
     const { content, usage, costDetails } = await callLLM(
       [{ role: 'user', content: prompt }],
-      { temperature: 0.3, max_tokens: 300 }
+      { temperature: 0.1, max_tokens: 600 }
     );
-    console.log(`[QUERY] Enhanced: "${query}" -> "${content}"`);
-    return { content, usage, costDetails };
+    
+    // Parse the JSON response
+    let result;
+    try {
+      const cleanedContent = content.trim().replace(/^```json\n?/, '').replace(/\n?```$/, '');
+      result = JSON.parse(cleanedContent);
+    } catch (parseError) {
+      console.error('[QUERY] Error parsing JSON from LLM:', parseError.message);
+      // Fallback
+      return { 
+        answerable: true, 
+        enhancedQuery: query, 
+        usage, 
+        costDetails 
+      };
+    }
+
+    console.log(`[QUERY] Analyzed: "${query}" -> Answerable: ${result.answerable}`);
+    return { ...result, usage, costDetails };
   } catch (error) {
     console.error('[QUERY] Error enhancing query:', error.message);
     // Fallback to original query if enhancement fails
-    return query;
+    return { 
+      answerable: true, 
+      enhancedQuery: query 
+    };
   }
 }
 
@@ -166,20 +198,43 @@ SQL Query:`;
 export async function processUserQuery(query, sessionId, topK = 5, onStep = null, history = []) {
   console.log(`[QUERY] Processing query: "${query}" for session: ${sessionId} (history: ${history.length} turns)`);
 
-  // Step 1: Enhance the query (context-aware rewriting for follow-ups)
+  // Step 1: Enhance the query — pass the DB schema so the LLM can validate answerability
+  // against actual table/column availability (zero extra API calls: graph is already in memory)
   let enhancedQuery = query;
   let stepStart = Date.now();
+
+  // Extract a lightweight schema summary from the in-memory session graph
+  let dbContext = null;
+  const serializedGraphForContext = getSessionGraph(sessionId);
+  if (serializedGraphForContext?.nodes) {
+    try {
+      dbContext = Object.values(serializedGraphForContext.nodes).map(t => ({
+        table: t.table,
+        description: t.description || '',
+        columns: (t.columns || []).map(c => ({ name: c.name, type: c.type }))
+      }));
+      console.log(`[QUERY] DB context built: ${dbContext.length} tables for enhanceQuery`);
+    } catch (e) {
+      console.warn('[QUERY] Could not extract DB context from graph:', e.message);
+    }
+  }
   
   try {
-    const enhancedResult = await enhanceQuery(query, history);
-    if (typeof enhancedResult === 'object' && enhancedResult.content) {
-       enhancedQuery = enhancedResult.content;
-       const metrics = enhancedResult.usage ? { tokens: enhancedResult.usage, cost: enhancedResult.costDetails?.estimatedCost } : null;
-       if (onStep) onStep('enhance', { query, historyTurns: history.length }, { enhancedQuery }, Date.now() - stepStart, null, metrics);
-    } else {
-       enhancedQuery = enhancedResult;
-       if (onStep) onStep('enhance', { query, historyTurns: history.length }, { enhancedQuery }, Date.now() - stepStart);
+    const enhancedResult = await enhanceQuery(query, history, dbContext);
+    
+    if (!enhancedResult.answerable) {
+       if (onStep) onStep('enhance', { query }, { cannotAnswer: true, reason: enhancedResult.reason }, Date.now() - stepStart);
+       return {
+         originalQuery: query,
+         cannotAnswer: true,
+         reason: enhancedResult.reason,
+         suggestions: enhancedResult.suggestions || []
+       };
     }
+
+    enhancedQuery = enhancedResult.enhancedQuery || query;
+    const metrics = enhancedResult.usage ? { tokens: enhancedResult.usage, cost: enhancedResult.costDetails?.estimatedCost } : null;
+    if (onStep) onStep('enhance', { query, historyTurns: history.length }, { enhancedQuery }, Date.now() - stepStart, null, metrics);
   } catch (err) {
     if (onStep) onStep('enhance', { query }, null, Date.now() - stepStart, err.message);
     // Non-fatal: fall back to raw query
