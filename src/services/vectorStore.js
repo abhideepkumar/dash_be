@@ -1,4 +1,5 @@
 import { Pinecone } from '@pinecone-database/pinecone';
+import { serializeForEmbedding } from './schemaExtractor.js';
 
 // Lazy-initialized client (prevents crash on import when env vars not set)
 let pinecone = null;
@@ -79,22 +80,11 @@ export async function generateEmbedding(text) {
 }
 
 /**
- * Create embeddable text from table metadata
- * @param {object} metadata - Enriched table metadata
- * @returns {string} Text representation for embedding
+ * Create embeddable text from canonical table metadata.
+ * Uses the purpose-built serializer from schemaExtractor.
  */
 function createEmbeddableText(metadata) {
-  const parts = [
-    `Table: ${metadata.table}`,
-    `Description: ${metadata.description}`,
-    `Columns: ${metadata.columns.map(c => `${c.name} (${c.meaning})`).join(', ')}`,
-  ];
-
-  if (metadata.common_queries && metadata.common_queries.length > 0) {
-    parts.push(`Common queries: ${metadata.common_queries.join(', ')}`);
-  }
-
-  return parts.join('\n');
+  return serializeForEmbedding(metadata);
 }
 
 /**
@@ -116,10 +106,12 @@ export async function upsertTableMetadata(metadata, namespace = 'default') {
       values: embedding,
       metadata: {
         table: metadata.table,
-        description: metadata.description,
+        table_type: metadata.table_type || 'standalone',
+        description: metadata.description || '',
         columns: JSON.stringify(metadata.columns),
-        foreign_keys: JSON.stringify(metadata.foreign_keys || []),
+        relationships: JSON.stringify(metadata.relationships || []),
         common_queries: JSON.stringify(metadata.common_queries || []),
+        freshness: metadata.profile?.freshness || 'unknown',
       },
     },
   ]);
@@ -170,11 +162,13 @@ export async function searchRelevantTables(query, namespace = 'default', topK = 
   
   return results.matches.map(match => ({
     table: match.metadata.table,
+    table_type: match.metadata.table_type || 'standalone',
     description: match.metadata.description,
     score: match.score,
     columns: JSON.parse(match.metadata.columns),
-    foreign_keys: JSON.parse(match.metadata.foreign_keys),
+    relationships: JSON.parse(match.metadata.relationships || '[]'),
     common_queries: JSON.parse(match.metadata.common_queries),
+    freshness: match.metadata.freshness || 'unknown',
   }));
 }
 

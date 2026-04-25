@@ -22,28 +22,32 @@ export function buildSchemaGraph(rawSchemas) {
   const nodes = new Map();
   const edges = new Map();
   
-  // Initialize nodes and empty edge sets
+  // The canonical schema IS the node — store directly without spreading
   for (const schema of rawSchemas) {
     nodes.set(schema.table, schema);
     edges.set(schema.table, new Set());
   }
   
-  // Build bidirectional edges from foreign keys
+  // Build bidirectional edges from canonical relationships[]
   for (const schema of rawSchemas) {
     const sourceTable = schema.table;
     
-    for (const fk of schema.foreignKeys || []) {
-      // fk.references = "target_table.column"
-      const targetTable = fk.references.split('.')[0];
-      
-      // Skip self-references and invalid references
-      if (targetTable === sourceTable || !edges.has(targetTable)) {
-        continue;
-      }
-      
-      // Add bidirectional edge (O(1) for Set)
+    for (const rel of schema.relationships || []) {
+      const targetTable = rel.references_table;
+      if (targetTable === sourceTable || !edges.has(targetTable)) continue;
       edges.get(sourceTable).add(targetTable);
       edges.get(targetTable).add(sourceTable);
+    }
+    
+    // Also build from column-level references (covers all FK paths)
+    for (const col of schema.columns || []) {
+      if (col.references) {
+        const targetTable = col.references.split('.')[0];
+        if (targetTable !== sourceTable && edges.has(targetTable)) {
+          edges.get(sourceTable).add(targetTable);
+          edges.get(targetTable).add(sourceTable);
+        }
+      }
     }
   }
   
@@ -197,10 +201,12 @@ export function expandWithGraph(graph, vectorResults, maxHops = 2, maxExpansion 
     if (metadata) {
       expanded.push({
         table: bridge,
+        table_type: metadata.table_type || 'bridge',
         description: metadata.description || `Bridge table connecting query-relevant tables`,
         score: 0,
         columns: metadata.columns || [],
-        foreign_keys: metadata.foreign_keys || [],
+        relationships: metadata.relationships || [],
+        profile: metadata.profile || null,
         is_bridge: true,
         common_queries: metadata.common_queries || []
       });
@@ -209,16 +215,19 @@ export function expandWithGraph(graph, vectorResults, maxHops = 2, maxExpansion 
     }
   }
   
-  // Priority 2: If we have room and no bridges, add high-connectivity neighbors
-  if (added < maxExpansion && bridges.size === 0) {
-    // Sort neighbors by connection count to seeds
+  // Priority 2: Add high-connectivity neighbors ONLY if they connect 2+ seeds.
+  // This prevents noise like dim_location appearing for product-only queries.
+  // For single-seed scenarios, only add direct FK-related tables.
+  if (added < maxExpansion) {
     const rankedNeighbors = [...neighbors]
       .filter(n => !seedSet.has(n))
       .map(n => ({
         table: n,
         connections: countConnectionsToSeeds(graph, n, seedSet)
       }))
-      .filter(n => n.connections > 0)
+      // Only add neighbors that connect to at least 2 seeds (high relevance)
+      // OR if there's only 1 seed, add direct 1-hop neighbors that are FK-related
+      .filter(n => n.connections >= Math.min(2, seedTables.length))
       .sort((a, b) => b.connections - a.connections);
     
     for (const { table, connections } of rankedNeighbors) {
@@ -228,16 +237,18 @@ export function expandWithGraph(graph, vectorResults, maxHops = 2, maxExpansion 
       if (metadata) {
         expanded.push({
           table,
+          table_type: metadata.table_type || 'dimension',
           description: metadata.description,
           score: 0,
           columns: metadata.columns || [],
-          foreign_keys: metadata.foreign_keys || [],
+          relationships: metadata.relationships || [],
+          profile: metadata.profile || null,
           is_neighbor: true,
           neighbor_connections: connections,
           common_queries: metadata.common_queries || []
         });
         added++;
-        console.log(`[GRAPH] Added neighbor table: ${table} (${connections} connections)`);
+        console.log(`[GRAPH] Added neighbor table: ${table} (${connections} seed-connections)`);
       }
     }
   }

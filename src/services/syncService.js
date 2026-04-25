@@ -69,18 +69,19 @@ async function runSyncProcess(userId, configId) {
     // Create connection pool
     createPool(sessionId, dbCredentials);
     
-    // Stage 1: Extract raw schema
-    console.log(`[SYNC] Stage 1: Extracting schema...`);
-    const rawSchemas = await getFullSchema(sessionId);
-    console.log(`[SYNC] Found ${rawSchemas.length} tables`);
+    // Stage 1: Extract canonical schema
+    // Returns fully profiled schemas with semantic roles, stats, freshness, table types
+    console.log(`[SYNC] Stage 1: Extracting canonical schema...`);
+    const canonicalSchemas = await getFullSchema(sessionId);
+    console.log(`[SYNC] Found ${canonicalSchemas.length} tables`);
     
-    // Stage 2: Enrich with LLM
+    // Stage 2: Enrich with LLM (merges descriptions into canonical schemas in-place)
     console.log(`[SYNC] Stage 2: Enriching with AI...`);
-    const enrichedSchemas = await generateAllMetadata(rawSchemas);
+    await generateAllMetadata(canonicalSchemas);
     
-    // Stage 3: Build schema graph
+    // Stage 3: Build schema graph (nodes = canonical schemas directly)
     console.log(`[SYNC] Stage 3: Building schema graph...`);
-    const schemaGraph = buildSchemaGraph(rawSchemas);
+    const schemaGraph = buildSchemaGraph(canonicalSchemas);
     const serializedGraph = serializeGraph(schemaGraph);
     
     // Store graph for query processor
@@ -90,14 +91,13 @@ async function runSyncProcess(userId, configId) {
     console.log(`[SYNC] Stage 4: Storing in Pinecone...`);
     await initIndex();
     await clearNamespace(sessionId);
-    await upsertAllMetadata(enrichedSchemas, sessionId);
+    await upsertAllMetadata(canonicalSchemas, sessionId);
     
-    // Update config with success
     // Update config with success
     await DbConfig.findByIdAndUpdate(configId, {
       syncStatus: 'completed',
       lastSyncedAt: new Date(),
-      tableCount: rawSchemas.length,
+      tableCount: canonicalSchemas.length,
       schemaGraph: serializedGraph,
       syncError: null
     });
@@ -105,7 +105,7 @@ async function runSyncProcess(userId, configId) {
     // Mark user as ready
     await User.findByIdAndUpdate(userId, { isReady: true });
     
-    console.log(`[SYNC] ✅ Sync completed for session: ${sessionId} (${rawSchemas.length} tables)`);
+    console.log(`[SYNC] ✅ Sync completed for session: ${sessionId} (${canonicalSchemas.length} tables)`);
     
   } catch (error) {
     console.error(`[SYNC] ❌ Sync failed for session ${sessionId}:`, error.message);

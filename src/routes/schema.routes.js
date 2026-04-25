@@ -96,27 +96,30 @@ router.post('/extract', async (req, res) => {
     // Start async extraction
     (async () => {
       try {
-        // Stage 1: Extract raw schema
-        console.log('[EXTRACT] Stage 1: Extracting raw schema from PostgreSQL...');
+        // Stage 1: Extract canonical schema
+        console.log('[EXTRACT] Stage 1: Extracting canonical schema...');
         extractionProgress.get(sessionId).stage = 'extracting';
         
-        const rawSchemas = await getFullSchema(sessionId, (table, idx, total) => {
+        const canonicalSchemas = await getFullSchema(sessionId, (table, idx, total) => {
           const progress = extractionProgress.get(sessionId);
           progress.currentTable = table;
           progress.current = idx;
           progress.total = total;
         });
         
-        console.log(`[EXTRACT] Stage 1 complete: Found ${rawSchemas.length} tables`);
-        rawSchemas.forEach(s => console.log(`  - ${s.table} (${s.columns.length} columns)`));
+        console.log(`[EXTRACT] Stage 1 complete: Found ${canonicalSchemas.length} tables`);
+        canonicalSchemas.forEach(s => {
+          const measures = s.columns.filter(c => c.semantic_role === 'measure').map(c => c.name).join(', ');
+          console.log(`  ${s.table_type.padEnd(10)} ${s.table} (${s.columns.length} cols, measures: ${measures || 'none'}, rows: ${s.profile.row_count || '?'})`);
+        });
 
-        // Stage 2: Enrich with LLM
-        console.log('[EXTRACT] Stage 2: Enriching with Gemini LLM...');
+        // Stage 2: Enrich with LLM (mutates canonical schemas in-place)
+        console.log('[EXTRACT] Stage 2: Enriching with LLM...');
         extractionProgress.get(sessionId).stage = 'enriching';
         extractionProgress.get(sessionId).current = 0;
-        extractionProgress.get(sessionId).total = rawSchemas.length;
+        extractionProgress.get(sessionId).total = canonicalSchemas.length;
         
-        const enrichedSchemas = await generateAllMetadata(rawSchemas, (table, idx, total, status) => {
+        await generateAllMetadata(canonicalSchemas, (table, idx, total, status) => {
           console.log(`[EXTRACT] Enriching table ${idx}/${total}: ${table}`);
           const progress = extractionProgress.get(sessionId);
           progress.currentTable = table;
@@ -124,22 +127,21 @@ router.post('/extract', async (req, res) => {
           progress.total = total;
         });
         
-        console.log(`[EXTRACT] Stage 2 complete: Enriched ${enrichedSchemas.length} tables`);
+        console.log(`[EXTRACT] Stage 2 complete: Enriched ${canonicalSchemas.length} tables`);
 
-        // Stage 2.5: Build Schema Graph (NEW)
-        console.log('[EXTRACT] Stage 2.5: Building schema graph for bridge detection...');
-        const schemaGraph = buildSchemaGraph(rawSchemas);
+        // Stage 2.5: Build Schema Graph (canonical schemas ARE the nodes)
+        console.log('[EXTRACT] Stage 2.5: Building schema graph...');
+        const schemaGraph = buildSchemaGraph(canonicalSchemas);
         const graphStats = getGraphStats(schemaGraph);
-        console.log(`[EXTRACT] Graph stats: ${graphStats.nodeCount} nodes, ${graphStats.edgeCount} edges`);
+        console.log(`[EXTRACT] Graph: ${graphStats.nodeCount} nodes, ${graphStats.edgeCount} edges`);
         if (graphStats.topConnected.length > 0) {
-          console.log(`[EXTRACT] Top connected tables: ${graphStats.topConnected.slice(0, 3).map(t => `${t.table}(${t.connections})`).join(', ')}`);
+          console.log(`[EXTRACT] Hub tables: ${graphStats.topConnected.slice(0, 3).map(t => `${t.table}(${t.connections})`).join(', ')}`);
         }
         
-        // Store serialized graph in progress
         const serializedGraph = serializeGraph(schemaGraph);
         extractionProgress.get(sessionId).graph = serializedGraph;
         
-        // Also store in queryProcessor for graph expansion during queries
+        // Store in queryProcessor for graph expansion during queries
         setSessionGraph(sessionId, serializedGraph);
 
         // Stage 3: Store in Pinecone
@@ -147,14 +149,10 @@ router.post('/extract', async (req, res) => {
         extractionProgress.get(sessionId).stage = 'storing';
         extractionProgress.get(sessionId).current = 0;
         
-        console.log('[EXTRACT] Initializing Pinecone index...');
         await initIndex();
-        
-        console.log('[EXTRACT] Clearing namespace...');
         await clearNamespace(sessionId);
         
-        console.log('[EXTRACT] Upserting metadata...');
-        await upsertAllMetadata(enrichedSchemas, sessionId, (table, idx, total, status) => {
+        await upsertAllMetadata(canonicalSchemas, sessionId, (table, idx, total, status) => {
           console.log(`[EXTRACT] Storing table ${idx}/${total}: ${table}`);
           const progress = extractionProgress.get(sessionId);
           progress.currentTable = table;
@@ -167,7 +165,7 @@ router.post('/extract', async (req, res) => {
         const progress = extractionProgress.get(sessionId);
         progress.stage = 'completed';
         progress.completed = true;
-        progress.schemas = enrichedSchemas;
+        progress.schemas = canonicalSchemas;
 
       } catch (error) {
         console.error('[EXTRACT] ❌ Extraction failed:', error);

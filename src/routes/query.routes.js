@@ -7,6 +7,7 @@ import { processUserQuery, setSessionGraph } from '../services/queryProcessor.js
 import { generateUISpec } from '../services/uiGenerator.js';
 import { createLog, logStep, completeLog } from '../services/queryLogger.js';
 import { authenticateToken } from '../middleware/auth.js';
+import { diagnoseEmptyResult } from '../services/answerContract.js';
 
 const router = express.Router();
 
@@ -207,12 +208,33 @@ router.post('/execute', authenticateToken, async (req, res) => {
         });
       }
 
+      // Zero-row diagnosis: if no results, run lightweight diagnostics
+      let diagnosis = null;
+      if (result.rowCount === 0) {
+        try {
+          diagnosis = await diagnoseEmptyResult(pool, sql);
+          console.log(`[QUERY ROUTE] Zero-row diagnosis: ${diagnosis.reason} — ${diagnosis.detail}`);
+          
+          if (logRequestId) {
+            await logStep(logRequestId, 'zero_row_diagnosis',
+              { sql: sql.substring(0, 200) },
+              diagnosis,
+              null,
+              Date.now() - stepStart
+            );
+          }
+        } catch (diagErr) {
+          console.warn('[QUERY ROUTE] Zero-row diagnosis failed:', diagErr.message);
+        }
+      }
+
       return res.json({
         success: true,
         requestId: logRequestId,
         rowCount: result.rowCount,
         rows: result.rows,
         fields: result.fields?.map(f => ({ name: f.name, dataTypeID: f.dataTypeID })),
+        ...(diagnosis ? { diagnosis } : {}),
       });
     } catch (error) {
       if (logRequestId) {

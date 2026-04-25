@@ -1,142 +1,129 @@
 import { callLLM } from '../utils/llmClient.js';
+import { serializeForAnswerability } from './schemaExtractor.js';
 
 /**
- * Generate semantic metadata for ALL tables in a single LLM call
- * @param {Array} rawSchemas - Array of raw table schemas from schemaExtractor
- * @param {function} onProgress - Progress callback
- * @returns {Promise<Array>} Array of enriched metadata
+ * Enrich canonical schemas with LLM-generated descriptions and meanings.
+ * 
+ * MUTATES the input schemas in-place — no separate output structure.
+ * This means:
+ *   - schema.description gets set
+ *   - schema.common_queries gets set
+ *   - Each column.meaning gets set
+ * 
+ * All deterministic metadata (semantic_role, aggregation, stats, enum_values)
+ * is already on the schema from schemaExtractor. The LLM only adds
+ * human-language descriptions — it never overwrites deterministic fields.
+ * 
+ * @param {Array} schemas - Canonical schemas from getFullSchema (mutated in-place)
+ * @param {function} onProgress - Optional progress callback
  */
-export async function generateAllMetadata(rawSchemas, onProgress = null) {
+export async function generateAllMetadata(schemas, onProgress = null) {
   if (onProgress) {
     onProgress('all tables', 1, 1, 'enriching');
   }
 
-  // Build a single prompt with all tables
-  const tablesDescription = rawSchemas.map(schema => {
-    const columns = schema.columns.map(c => {
-      let colDesc = `    - ${c.name} (${c.type}${c.nullable ? ', nullable' : ''})`;
-      // Include enum values if present (NEW)
-      if (c.is_enum && c.enum_values && c.enum_values.length > 0) {
-        colDesc += ` [ENUM: ${c.enum_values.join(', ')}]`;
-      }
-      return colDesc;
-    }).join('\n');
-    
-    const fks = schema.foreignKeys.length > 0
-      ? schema.foreignKeys.map(fk => `    - ${fk.column} -> ${fk.references}`).join('\n')
-      : '    None';
-    
-    return `
-TABLE: ${schema.table}
-Primary Keys: ${schema.primaryKeys.join(', ') || 'None'}
-Columns:
-${columns}
-Foreign Keys:
-${fks}`;
+  // Build the prompt using the answerability serializer (it's compact and rich)
+  const tablesDescription = schemas.map(schema => {
+    return serializeForAnswerability(schema);
   }).join('\n\n---\n');
 
-  const prompt = `You are a database documentation expert. Given the following database schema with ${rawSchemas.length} tables, generate semantic descriptions for ALL tables.
+  const prompt = `You are a database documentation expert. Given the following database schema with ${schemas.length} tables, generate semantic descriptions.
 
 ${tablesDescription}
 
-Generate a JSON array with one object per table. Each object must have this exact structure:
+Generate a JSON array with one object per table. Each object must have:
 {
   "table": "table_name",
-  "description": "1-2 sentence purpose of this table",
+  "description": "1-2 sentence business purpose of this table",
   "columns": [
-    {"name": "column_name", "type": "data_type", "meaning": "business purpose of this column"}
+    {"name": "column_name", "meaning": "what this column means in business terms"}
   ],
-  "foreign_keys": ["table.column", "table.column"],
-  "common_queries": ["3-5 example natural language questions this table could help answer"]
+  "common_queries": ["3-5 example natural language questions this table helps answer"]
 }
 
 IMPORTANT: 
-- Return a valid JSON array containing exactly ${rawSchemas.length} objects
-- No markdown, no explanation, ONLY the JSON array
-- Include ALL ${rawSchemas.length} tables in your response
-- For columns marked [ENUM: ...], the valid values are already provided - use them in the meaning`;
+- Return ONLY valid JSON array with exactly ${schemas.length} objects
+- No markdown, no explanation
+- Include ALL ${schemas.length} tables
+- For measure columns, describe what metric they represent
+- For dimension columns, describe what entity or category they label
+- For timestamp columns, describe what business event they mark
+- common_queries should be realistic questions a business analyst would ask`;
 
   try {
-    console.log(`[METADATA] Sending ${rawSchemas.length} tables to LLM...`);
+    console.log(`[METADATA] Sending ${schemas.length} tables to LLM for enrichment...`);
 
     const { content: responseText } = await callLLM(
       [{ role: 'user', content: prompt }],
       { temperature: 0.3 }
     );
 
-    // Clean up response - remove markdown code blocks if present
+    // Clean up response
     let cleanJson = responseText.trim();
-    if (cleanJson.startsWith('```json')) {
-      cleanJson = cleanJson.slice(7);
-    }
-    if (cleanJson.startsWith('```')) {
-      cleanJson = cleanJson.slice(3);
-    }
-    if (cleanJson.endsWith('```')) {
-      cleanJson = cleanJson.slice(0, -3);
-    }
+    if (cleanJson.startsWith('```json')) cleanJson = cleanJson.slice(7);
+    if (cleanJson.startsWith('```')) cleanJson = cleanJson.slice(3);
+    if (cleanJson.endsWith('```')) cleanJson = cleanJson.slice(0, -3);
     cleanJson = cleanJson.trim();
 
     const parsed = JSON.parse(cleanJson);
-    console.log(`[METADATA] ✅ Received metadata for ${parsed.length} tables`);
+    console.log(`[METADATA] ✅ Received enrichment for ${parsed.length} tables`);
     
-    // Merge enum values from raw schema into parsed result (NEW)
-    const enrichedResult = mergeEnumValues(parsed, rawSchemas);
+    // Merge LLM output into canonical schemas IN-PLACE
+    mergeLLMEnrichment(schemas, parsed);
     
-    return enrichedResult;
   } catch (error) {
-    console.error('[METADATA] ❌ Error generating metadata:', error.message);
-    
-    // Return basic metadata for all tables if LLM fails
-    return rawSchemas.map(schema => ({
-      table: schema.table,
-      description: `Table containing ${schema.columns.length} columns`,
-      columns: schema.columns.map(c => ({
-        name: c.name,
-        type: c.type,
-        meaning: c.name.replace(/_/g, ' '),
-        ...(c.is_enum && c.enum_values ? { is_enum: true, enum_values: c.enum_values } : {})
-      })),
-      foreign_keys: schema.foreignKeys.map(fk => `${fk.references}`),
-      common_queries: [],
-    }));
+    console.error('[METADATA] ❌ LLM enrichment failed:', error.message);
+    // Non-fatal: schemas keep their default descriptions
+    // column.meaning already defaults to the column name
+    for (const schema of schemas) {
+      if (!schema.description) {
+        schema.description = `Table ${schema.table} with ${schema.columns.length} columns`;
+      }
+    }
   }
 }
 
 /**
- * Merge enum values from raw schema into AI-enriched metadata
- * This ensures enum_values are preserved even if AI doesn't include them
+ * Merge LLM-generated descriptions into canonical schemas.
+ * Only sets description, common_queries, and column.meaning.
+ * Never overwrites deterministic fields (semantic_role, aggregation, stats, etc.)
+ * 
+ * @param {Array} schemas - Canonical schemas (mutated in-place)
+ * @param {Array} llmOutput - Parsed LLM response
  */
-function mergeEnumValues(enrichedMetadata, rawSchemas) {
-  // Create lookup map for raw schema columns
-  const rawSchemaMap = {};
-  rawSchemas.forEach(schema => {
-    rawSchemaMap[schema.table] = {};
-    schema.columns.forEach(col => {
-      if (col.is_enum && col.enum_values) {
-        rawSchemaMap[schema.table][col.name] = col.enum_values;
-      }
-    });
-  });
-  
-  // Merge enum values into enriched metadata
-  return enrichedMetadata.map(table => {
-    const tableEnums = rawSchemaMap[table.table] || {};
-    
-    if (table.columns) {
-      table.columns = table.columns.map(col => {
-        const enumValues = tableEnums[col.name];
-        if (enumValues) {
-          return {
-            ...col,
-            is_enum: true,
-            enum_values: enumValues
-          };
-        }
-        return col;
-      });
+function mergeLLMEnrichment(schemas, llmOutput) {
+  // Build lookup map from LLM output
+  const llmMap = {};
+  for (const item of llmOutput) {
+    llmMap[item.table] = item;
+  }
+
+  for (const schema of schemas) {
+    const enrichment = llmMap[schema.table];
+    if (!enrichment) continue;
+
+    // Set table-level fields
+    if (enrichment.description) {
+      schema.description = enrichment.description;
     }
-    
-    return table;
-  });
+    if (enrichment.common_queries?.length) {
+      schema.common_queries = enrichment.common_queries;
+    }
+
+    // Set column-level meanings
+    if (enrichment.columns?.length) {
+      const meaningMap = {};
+      for (const col of enrichment.columns) {
+        if (col.meaning) meaningMap[col.name] = col.meaning;
+      }
+      
+      for (const col of schema.columns) {
+        if (meaningMap[col.name]) {
+          col.meaning = meaningMap[col.name];
+        }
+      }
+    }
+  }
+
+  console.log(`[METADATA] Merged enrichment into ${schemas.length} canonical schemas`);
 }

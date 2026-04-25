@@ -1,63 +1,57 @@
 import { callLLM } from '../utils/llmClient.js';
 import { searchRelevantTables } from './vectorStore.js';
 import { deserializeGraph, expandWithGraph } from './schemaGraph.js';
+import { serializeForAnswerability, serializeForSQLGeneration, serializeForContract } from './schemaExtractor.js';
+import { generateAnswerContract, validateSQLAgainstContract, repairSQL } from './answerContract.js';
 
 // Session graph storage (populated from schema extraction)
 const sessionGraphs = new Map();
 
-/**
- * Store schema graph for a session (called from schema.routes.js)
- */
 export function setSessionGraph(sessionId, serializedGraph) {
   sessionGraphs.set(sessionId, serializedGraph);
   console.log(`[QUERY] Stored schema graph for session: ${sessionId}`);
 }
 
-/**
- * Get schema graph for a session
- */
 export function getSessionGraph(sessionId) {
   return sessionGraphs.get(sessionId);
 }
 
+// ============================================
+// QUERY PIPELINE
+// ============================================
+
 /**
- * Enhance a user query to make it clearer and more suitable for vector search and SQL generation.
- * Also validates whether the query is answerable given the known DB schema.
- * @param {string} query - Original user query
- * @param {Array} history - Conversation history
- * @param {Array} dbContext - Lightweight schema summary [{table, description, columns: [name, type]}]
- * @returns {Promise<Object>} { answerable, enhancedQuery, reason, suggestions, usage, costDetails }
+ * Enhance a user query: validate answerability + produce enhanced query.
+ * Uses the canonical serializeForAnswerability() — no ad-hoc formatting.
  */
 export async function enhanceQuery(query, history = [], dbContext = null) {
-  // Build the history context section for the prompt
+  // History section
   let historySection = '';
   if (history.length > 0) {
-    // Cap at last 5 entries to keep prompt size manageable
-    const recentHistory = history.slice(-5);
-    historySection = `\nConversation History (most recent last):\n${recentHistory
-      .map((entry, i) => `  Turn ${i + 1}:\n    User asked: "${entry.query}"\n    SQL generated: ${entry.sql}`)
+    const recent = history.slice(-5);
+    historySection = `\nConversation History:\n${recent
+      .map((e, i) => `  Turn ${i + 1}: User: "${e.query}" → SQL: ${e.sql}`)
       .join('\n')}\n`;
   }
 
-  // Build DB schema section when available
+  // Schema section — uses purpose-built serializer from schemaExtractor
   let schemaSection = '';
   if (dbContext && dbContext.length > 0) {
-    const schemaLines = dbContext.map(t => {
-      const colList = t.columns.map(c => `${c.name} (${c.type})`).join(', ');
-      return `  - ${t.table}: ${t.description}. Columns: [${colList}]`;
-    }).join('\n');
-    schemaSection = `\nDatabase Schema (ALL available tables and columns):\n${schemaLines}\n`;
+    const schemaLines = dbContext.map(t => serializeForAnswerability(t)).join('\n\n');
+    schemaSection = `\nDatabase Schema:\n${schemaLines}\n`;
   }
 
-  const prompt = `You are a database query assistant. Your task is to analyze the user's query and determine if it can be genuinely answered using the available database schema.\n${ historySection }${ schemaSection }
+  const prompt = `You are a database query assistant. Analyze the user's query and determine if it can be answered using the available schema.${historySection}${schemaSection}
 New user query: "${query}"
 
 Rules:
-1. If the query is a greeting, small talk, or clearly not a data request — set "answerable" to false. Provide a friendly "reason" and 3 data-related "suggestions".
-2. If the query is a data question but the required data (specific columns, statuses, or measurements) does NOT exist in the schema — set "answerable" to false. Explain specifically what is missing in "reason" and suggest 3 queries that CAN be answered using the actual schema.
-3. If the query is a valid data question that can be answered with the available schema — set "answerable" to true and provide a clear, standalone "enhancedQuery".
-4. Add relevant database keywords to the "enhancedQuery". Keep it as a natural language question, NOT SQL.
-5. Return ONLY valid JSON.
+1. If the query is a greeting or not a data request → "answerable": false with a friendly reason and 3 data-related suggestions.
+2. If the query asks for data that doesn't exist in the schema → "answerable": false with specific explanation and 3 answerable suggestions.
+3. If answerable → "answerable": true with a clear, standalone "enhancedQuery" (natural language, NOT SQL).
+4. Use the [measure] and [dimension] tags to understand what questions can be answered.
+5. Use the Time/freshness info to understand available date ranges.
+6. Use table types (fact/dimension) to understand entity relationships.
+7. Return ONLY valid JSON.
 
 JSON format:
 {
@@ -73,75 +67,55 @@ JSON format:
       { temperature: 0.1, max_tokens: 600 }
     );
     
-    // Parse the JSON response
     let result;
     try {
-      const cleanedContent = content.trim().replace(/^```json\n?/, '').replace(/\n?```$/, '');
-      result = JSON.parse(cleanedContent);
+      const cleaned = content.trim().replace(/^```json\n?/, '').replace(/\n?```$/, '');
+      result = JSON.parse(cleaned);
     } catch (parseError) {
-      console.error('[QUERY] Error parsing JSON from LLM:', parseError.message);
-      // Fallback
-      return { 
-        answerable: true, 
-        enhancedQuery: query, 
-        usage, 
-        costDetails 
-      };
+      console.error('[QUERY] JSON parse error:', parseError.message);
+      return { answerable: true, enhancedQuery: query, usage, costDetails };
     }
 
-    console.log(`[QUERY] Analyzed: "${query}" -> Answerable: ${result.answerable}`);
+    console.log(`[QUERY] Analyzed: "${query}" → Answerable: ${result.answerable}`);
     return { ...result, usage, costDetails };
   } catch (error) {
-    console.error('[QUERY] Error enhancing query:', error.message);
-    // Fallback to original query if enhancement fails
-    return { 
-      answerable: true, 
-      enhancedQuery: query 
-    };
+    console.error('[QUERY] Enhancement error:', error.message);
+    return { answerable: true, enhancedQuery: query };
   }
 }
 
 /**
- * Generate SQL query based on enhanced query and relevant table schemas
- * @param {string} query - The enhanced query
- * @param {Array} tables - Array of relevant table schemas
- * @returns {Promise<string>} Generated SQL query
+ * Generate SQL from enhanced query + relevant tables.
+ * Uses serializeForSQLGeneration() — each table rendered with
+ * full semantic annotations directly actionable by the LLM.
  */
-export async function generateSQL(query, tables, history = []) {
-  // Format table schemas for the prompt with enum values
-  const schemaText = tables.map(t => {
-    const cols = t.columns.map(c => {
-      let colDesc = `    ${c.name} (${c.type}): ${c.meaning || c.name}`;
-      // Include enum values if present (CRITICAL for correct SQL generation)
-      if (c.is_enum && c.enum_values && c.enum_values.length > 0) {
-        colDesc += ` [VALID VALUES: ${c.enum_values.join(', ')}]`;
-      }
-      return colDesc;
-    }).join('\n');
-    const fks = t.foreign_keys && t.foreign_keys.length > 0 
-      ? `  Foreign Keys: ${t.foreign_keys.join(', ')}`
-      : '';
-    
-    // Mark bridge tables for LLM awareness
-    const bridgeNote = t.is_bridge ? ' [BRIDGE TABLE - connects other tables]' : '';
-    
-    return `TABLE: ${t.table}${bridgeNote}
-  Description: ${t.description}
-  Columns:
-${cols}
-${fks}`;
-  }).join('\n\n');
+export async function generateSQL(query, tables, history = [], contract = null) {
+  // Schema text — uses the purpose-built SQL serializer
+  const schemaText = tables.map(t => serializeForSQLGeneration(t)).join('\n\n');
 
-  // Inject conversation history context for follow-up queries
+  // History context
   let historyContext = '';
   if (history.length > 0) {
-    const recentHistory = history.slice(-5);
-    historyContext = `\n## Prior Conversation Context\nThe current request may be a follow-up. Use the prior SQL as reference for table aliases, column selections, and filter patterns.\n${recentHistory
-      .map((entry, i) => `  Turn ${i + 1}: User asked "${entry.query}"\n  SQL: ${entry.sql}`)
+    historyContext = `\n## Prior Context\n${history.slice(-5)
+      .map((e, i) => `  Turn ${i + 1}: "${e.query}" → ${e.sql}`)
       .join('\n')}\n`;
   }
 
-  const prompt = `You are a PostgreSQL expert. Generate a SQL query based on the user's request and the available table schemas.${ historyContext }
+  // Contract section — tells the LLM exactly what must be in the output
+  let contractSection = '';
+  if (contract && contract.intent !== 'unknown') {
+    contractSection = `\n## Analytical Contract (MUST SATISFY)
+- Intent: ${contract.intent}
+- Required output columns: [${(contract.required_output_columns || []).join(', ')}]
+- Metrics: ${(contract.metrics || []).map(m => `${m.aggregation}(${m.source_column}) AS ${m.name}`).join(', ') || 'none'}
+- Dimensions: ${(contract.dimensions || []).map(d => d.source_column).join(', ') || 'none'}
+- Sort: ${contract.sort ? `${contract.sort.by} ${contract.sort.direction}` : 'none'}
+- Limit: ${contract.limit || 'none'}
+- Time filter: ${contract.time_filter?.needed ? contract.time_filter.description : 'none'}
+Your SQL SELECT MUST include ALL required output columns.\n`;
+  }
+
+  const prompt = `You are a PostgreSQL expert. Generate a SQL query.${historyContext}${contractSection}
 
 User Request: "${query}"
 
@@ -149,15 +123,23 @@ Available Tables:
 ${schemaText}
 
 Rules:
-1. Generate ONLY valid PostgreSQL syntax
-2. Use appropriate JOINs based on foreign key relationships
-3. Include necessary WHERE clauses based on the query
-4. Use meaningful aliases for tables
-5. For columns with [VALID VALUES: ...], ONLY use those exact values in WHERE clauses
-6. Tables marked [BRIDGE TABLE] are junction tables - use them to connect other tables
-7. Return ONLY the SQL query, no explanation, no markdown code blocks
+1. Valid PostgreSQL syntax only
+2. Use JOINs based on foreign key relationships shown (FK → references)
+3. For [VALID VALUES: ...] — ONLY use those exact values in WHERE
+4. [BRIDGE TABLE] are junction tables — use them for many-to-many joins
+5. [FACT TABLE] should be in FROM; [DIMENSION TABLE] should be JOINed
+6. **CRITICAL — METRICS**: When user asks for "total", "highest", "best", "sum of", "count of":
+   ALWAYS include BOTH the dimension AND the aggregated measure in SELECT.
+   WRONG: SELECT region FROM...
+   RIGHT: SELECT region, SUM(sales_amount) AS total_sales FROM...
+7. **CRITICAL — AGGREGATION**: For columns marked [measure] → use the suggested aggregation function shown (SUM, AVG, etc). Always give a meaningful alias (AS total_sales, AS avg_discount).
+8. **CRITICAL — TIME**: Look for ⚠️ HISTORICAL DATA warnings. If present:
+   Use: WHERE date_col >= (SELECT MAX(date_col) - INTERVAL 'N days' FROM table)
+   NOT: WHERE date_col >= CURRENT_DATE - INTERVAL 'N days'
+9. For columns with (PK) and (FK →) annotations, use them for JOIN ON clauses
+10. Return ONLY the SQL query — no explanation, no markdown
 
-SQL Query:`;
+SQL:`;
 
   try {
     const { content: rawSql, usage, costDetails } = await callLLM(
@@ -166,167 +148,203 @@ SQL Query:`;
     );
 
     let sql = rawSql;
-    
-    // Clean up any markdown code blocks if present
-    if (sql.startsWith('```sql')) {
-      sql = sql.slice(6);
-    }
-    if (sql.startsWith('```')) {
-      sql = sql.slice(3);
-    }
-    if (sql.endsWith('```')) {
-      sql = sql.slice(0, -3);
-    }
+    if (sql.startsWith('```sql')) sql = sql.slice(6);
+    if (sql.startsWith('```')) sql = sql.slice(3);
+    if (sql.endsWith('```')) sql = sql.slice(0, -3);
     sql = sql.trim();
 
     console.log(`[QUERY] Generated SQL for: "${query}"`);
     return { sql, usage, costDetails };
   } catch (error) {
-    console.error('[QUERY] Error generating SQL:', error.message);
-    throw new Error('Failed to generate SQL query: ' + error.message);
+    console.error('[QUERY] SQL generation error:', error.message);
+    throw new Error('Failed to generate SQL: ' + error.message);
   }
 }
 
 /**
- * Main orchestrator: Process a user query through the full pipeline
- * @param {string} query - Original user query
- * @param {string} sessionId - Session ID for namespace isolation in vector store
- * @param {number} topK - Number of relevant tables to retrieve (default: 5)
- * @param {function} onStep - Optional callback for logging steps: (stepName, input, output, durationMs, error?) => void
- * @returns {Promise<Object>} Result containing enhancedQuery, relevantTables, and sql
+ * Main pipeline orchestrator.
+ * 
+ * Flow:
+ * 1. enhanceQuery — answerability + query enhancement (with full semantic context)
+ * 2. searchRelevantTables — vector search for relevant tables
+ * 3. expandWithGraph — bridge table discovery (tighter: 2+ seed connections)
+ *    + merge semantic metadata from graph nodes into vector results
+ * 4. generateAnswerContract — structured intent defining what SQL must produce
+ * 5. generateSQL — SQL generation guided by contract + semantic annotations
+ * 6. validateSQLAgainstContract — deterministic completeness check
+ * 7. repairSQL — auto-fix if validation fails (max 1 retry)
  */
 export async function processUserQuery(query, sessionId, topK = 5, onStep = null, history = []) {
-  console.log(`[QUERY] Processing query: "${query}" for session: ${sessionId} (history: ${history.length} turns)`);
+  console.log(`[QUERY] Processing: "${query}" (session: ${sessionId}, history: ${history.length})`);
 
-  // Step 1: Enhance the query — pass the DB schema so the LLM can validate answerability
-  // against actual table/column availability (zero extra API calls: graph is already in memory)
+  // === Step 1: Enhance & validate answerability ===
   let enhancedQuery = query;
   let stepStart = Date.now();
-
-  // Extract a lightweight schema summary from the in-memory session graph
+  
+  const serializedGraph = getSessionGraph(sessionId);
+  
+  // Build semantic DB context from graph nodes (canonical schemas)
   let dbContext = null;
-  const serializedGraphForContext = getSessionGraph(sessionId);
-  if (serializedGraphForContext?.nodes) {
-    try {
-      dbContext = Object.values(serializedGraphForContext.nodes).map(t => ({
-        table: t.table,
-        description: t.description || '',
-        columns: (t.columns || []).map(c => ({ name: c.name, type: c.type }))
-      }));
-      console.log(`[QUERY] DB context built: ${dbContext.length} tables for enhanceQuery`);
-    } catch (e) {
-      console.warn('[QUERY] Could not extract DB context from graph:', e.message);
-    }
+  if (serializedGraph?.nodes) {
+    dbContext = Object.values(serializedGraph.nodes);
+    console.log(`[QUERY] Semantic context: ${dbContext.length} tables`);
   }
   
   try {
     if (history.length === 0) {
-      // Only run enhanceQuery for fresh (non-follow-up) queries.
-      // Follow-ups skip this step — the original query already passed schema validation.
-      const enhancedResult = await enhanceQuery(query, [], dbContext);
-
-      if (!enhancedResult.answerable) {
-        if (onStep) onStep('enhance', { query }, { cannotAnswer: true, reason: enhancedResult.reason }, Date.now() - stepStart);
+      const result = await enhanceQuery(query, [], dbContext);
+      if (!result.answerable) {
+        if (onStep) onStep('enhance', { query }, { cannotAnswer: true, reason: result.reason }, Date.now() - stepStart);
         return {
           originalQuery: query,
           cannotAnswer: true,
-          reason: enhancedResult.reason,
-          suggestions: enhancedResult.suggestions || []
+          reason: result.reason,
+          suggestions: result.suggestions || []
         };
       }
-
-      enhancedQuery = enhancedResult.enhancedQuery || query;
-      const metrics = enhancedResult.usage ? { tokens: enhancedResult.usage, cost: enhancedResult.costDetails?.estimatedCost } : null;
-      if (onStep) onStep('enhance', { query, historyTurns: 0 }, { enhancedQuery }, Date.now() - stepStart, null, metrics);
+      enhancedQuery = result.enhancedQuery || query;
+      const metrics = result.usage ? { tokens: result.usage, cost: result.costDetails?.estimatedCost } : null;
+      if (onStep) onStep('enhance', { query }, { enhancedQuery }, Date.now() - stepStart, null, metrics);
     } else {
-      // Follow-up query: trust the user, skip answerability check.
       enhancedQuery = query;
-      if (onStep) onStep('enhance', { query, skipped: true, reason: 'follow-up query — bypassing schema validation' }, { enhancedQuery }, 0);
+      if (onStep) onStep('enhance', { query, skipped: true, reason: 'follow-up' }, { enhancedQuery }, 0);
     }
   } catch (err) {
     if (onStep) onStep('enhance', { query }, null, Date.now() - stepStart, err.message);
-    // Non-fatal: fall back to raw query
     enhancedQuery = query;
   }
 
-  // Step 2: Search for relevant tables using vector store
+  // === Step 2: Vector search ===
   stepStart = Date.now();
   let relevantTables;
   try {
     relevantTables = await searchRelevantTables(enhancedQuery, sessionId, topK);
-    
     if (relevantTables.length === 0) {
       const error = 'No relevant tables found. Please ensure the database schema has been extracted.';
-      if (onStep) onStep('vector_search', { query: enhancedQuery, sessionId, topK }, null, Date.now() - stepStart, error);
+      if (onStep) onStep('vector_search', { query: enhancedQuery }, null, Date.now() - stepStart, error);
       throw new Error(error);
     }
-    
     if (onStep) {
       onStep('vector_search', 
-        { query: enhancedQuery, sessionId, topK }, 
+        { query: enhancedQuery, topK }, 
         { tablesFound: relevantTables.length, tables: relevantTables.map(t => ({ table: t.table, score: t.score })) },
         Date.now() - stepStart
       );
     }
   } catch (err) {
-    if (onStep && !err.message.includes('No relevant tables')) {
-      onStep('vector_search', { query: enhancedQuery, sessionId, topK }, null, Date.now() - stepStart, err.message);
+    if (!err.message.includes('No relevant tables') && onStep) {
+      onStep('vector_search', { query: enhancedQuery }, null, Date.now() - stepStart, err.message);
     }
     throw err;
   }
 
-  console.log(`[QUERY] Vector search found ${relevantTables.length} tables: ${relevantTables.map(t => t.table).join(', ')}`);
+  console.log(`[QUERY] Vector search: ${relevantTables.map(t => `${t.table}(${t.score.toFixed(2)})`).join(', ')}`);
 
-  // Step 2.5: Expand with graph - find bridge tables
+  // === Step 2.5: Graph expansion + semantic enrichment ===
   stepStart = Date.now();
-  const serializedGraph = getSessionGraph(sessionId);
   const originalTableCount = relevantTables.length;
   
   if (serializedGraph) {
     const graph = deserializeGraph(serializedGraph);
     if (graph) {
+      // Enrich vector results with canonical metadata from graph nodes
+      // Graph nodes have full profiling data; vector results may have partial
+      relevantTables = relevantTables.map(vt => {
+        const graphNode = graph.nodes.get(vt.table);
+        if (graphNode) {
+          return {
+            ...vt,
+            // Use graph node's canonical data (has profiling, freshness, etc.)
+            columns: graphNode.columns || vt.columns,
+            table_type: graphNode.table_type || vt.table_type,
+            profile: graphNode.profile || null,
+            relationships: graphNode.relationships || vt.relationships,
+          };
+        }
+        return vt;
+      });
+
       const expandedTables = expandWithGraph(graph, relevantTables, 2, 3);
       if (expandedTables.length > relevantTables.length) {
-        console.log(`[QUERY] Graph expansion added ${expandedTables.length - relevantTables.length} bridge/neighbor tables`);
+        console.log(`[QUERY] Graph expansion: +${expandedTables.length - relevantTables.length} tables`);
         relevantTables = expandedTables;
       }
     }
-  } else {
-    console.log(`[QUERY] No schema graph found for session, skipping graph expansion`);
   }
   
   if (onStep) {
     onStep('graph_expand',
-      { originalTables: originalTableCount, hasGraph: !!serializedGraph },
-      { 
-        expandedTables: relevantTables.length,
-        addedTables: relevantTables.length - originalTableCount,
-        allTables: relevantTables.map(t => ({ table: t.table, is_bridge: t.is_bridge || false }))
-      },
+      { originalTables: originalTableCount },
+      { expandedTables: relevantTables.length, addedTables: relevantTables.length - originalTableCount },
       Date.now() - stepStart
     );
   }
 
-  // Step 3: Generate SQL using the enhanced query and schemas
+  // === Step 3: Generate Answer Contract ===
+  stepStart = Date.now();
+  let contract = null;
+  try {
+    const contractResult = await generateAnswerContract(enhancedQuery, relevantTables);
+    contract = contractResult.contract;
+    const metrics = contractResult.usage ? { tokens: contractResult.usage, cost: contractResult.costDetails?.estimatedCost } : null;
+    if (onStep) {
+      onStep('answer_contract',
+        { query: enhancedQuery },
+        { intent: contract.intent, requiredCols: contract.required_output_columns || [] },
+        Date.now() - stepStart, null, metrics
+      );
+    }
+    console.log(`[QUERY] Contract: intent=${contract.intent}, required=[${(contract.required_output_columns || []).join(', ')}]`);
+  } catch (err) {
+    console.warn('[QUERY] Contract failed:', err.message);
+    if (onStep) onStep('answer_contract', {}, null, Date.now() - stepStart, err.message);
+  }
+
+  // === Step 4: Generate SQL ===
   stepStart = Date.now();
   let sql;
   try {
-    const sqlResult = await generateSQL(enhancedQuery, relevantTables, history);
+    const sqlResult = await generateSQL(enhancedQuery, relevantTables, history, contract);
     sql = sqlResult.sql;
     const metrics = sqlResult.usage ? { tokens: sqlResult.usage, cost: sqlResult.costDetails?.estimatedCost } : null;
-    
     if (onStep) {
       onStep('sql_generate',
-        { query: enhancedQuery, tableCount: relevantTables.length, historyTurns: history.length },
+        { query: enhancedQuery, hasContract: !!contract },
         { sql, sqlLength: sql.length },
-        Date.now() - stepStart,
-        null,
-        metrics
+        Date.now() - stepStart, null, metrics
       );
     }
   } catch (err) {
-    if (onStep) onStep('sql_generate', { query: enhancedQuery, tableCount: relevantTables.length }, null, Date.now() - stepStart, err.message);
+    if (onStep) onStep('sql_generate', {}, null, Date.now() - stepStart, err.message);
     throw err;
+  }
+
+  // === Step 5: Validate SQL against contract ===
+  stepStart = Date.now();
+  if (contract && contract.intent !== 'unknown') {
+    const validation = validateSQLAgainstContract(sql, contract);
+    if (onStep) {
+      onStep('sql_validate', {}, { valid: validation.valid, errors: validation.errors }, Date.now() - stepStart);
+    }
+
+    // Step 5.5: Repair if invalid
+    if (!validation.valid) {
+      console.log(`[QUERY] Validation failed (${validation.errors.length} errors), attempting repair`);
+      const repairStart = Date.now();
+      try {
+        const repairResult = await repairSQL(sql, contract, validation.errors, relevantTables);
+        if (repairResult.wasRepaired) {
+          sql = repairResult.repairedSQL;
+          const revalidation = validateSQLAgainstContract(sql, contract);
+          const metrics = repairResult.usage ? { tokens: repairResult.usage, cost: repairResult.costDetails?.estimatedCost } : null;
+          if (onStep) onStep('sql_repair', {}, { repaired: true, remainingErrors: revalidation.errors.length }, Date.now() - repairStart, null, metrics);
+        } else {
+          if (onStep) onStep('sql_repair', {}, { repaired: false }, Date.now() - repairStart);
+        }
+      } catch (repairErr) {
+        if (onStep) onStep('sql_repair', {}, null, Date.now() - repairStart, repairErr.message);
+      }
+    }
   }
 
   return {
@@ -334,12 +352,12 @@ export async function processUserQuery(query, sessionId, topK = 5, onStep = null
     enhancedQuery,
     relevantTables: relevantTables.map(t => ({
       table: t.table,
+      table_type: t.table_type || 'standalone',
       description: t.description,
       score: t.score,
       is_bridge: t.is_bridge || false,
     })),
     sql,
+    contract,
   };
 }
-
-
