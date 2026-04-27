@@ -252,9 +252,10 @@ async function callNvidiaNim(messages, opts = {}) {
   const payload = {
     model,
     messages,
-    // Provide at least 4096 tokens for NIM models to allow 'thinking' to complete
-    // otherwise the stream gets cut off and returns empty content.
-    max_tokens: Math.max(opts.max_tokens || 0, 4096),
+    // Only set max_tokens if explicitly provided — omitting it lets the model use its full budget.
+    // Previously this was Math.max(opts.max_tokens || 0, 4096) which silently capped all
+    // uncapped calls (e.g. metadata enrichment) at 4096 tokens, causing truncated JSON.
+    ...(opts.max_tokens ? { max_tokens: opts.max_tokens } : {}),
     temperature: opts.temperature ?? 1.0,
     top_p: opts.top_p ?? 0.95,
     stream: true,

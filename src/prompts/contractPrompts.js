@@ -78,7 +78,8 @@ Rules:
 1. Fix ONLY the issues listed above
 2. Keep the original query logic intact
 3. Ensure all required_output_columns appear in SELECT
-4. Return ONLY the fixed SQL query, no explanation, no markdown
+4. **CRITICAL — IDENTIFIERS**: PostgreSQL folds unquoted identifiers to lowercase. If a schema or table contains uppercase letters (e.g. Schema.TableName), you MUST wrap the schema and the table separately in double quotes in your repaired query (e.g. FROM "Schema"."TableName"). Do NOT use unquoted mixed-case names.
+5. Return ONLY the fixed SQL query, no explanation, no markdown
 
 Fixed SQL:`;
 }

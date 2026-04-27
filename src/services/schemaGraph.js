@@ -42,7 +42,12 @@ export function buildSchemaGraph(rawSchemas) {
     // Also build from column-level references (covers all FK paths)
     for (const col of schema.columns || []) {
       if (col.references) {
-        const targetTable = col.references.split('.')[0];
+        // col.references is "Schema.TableName.column" (3 parts) or legacy "table.column" (2 parts)
+        // Target table is everything except the last segment (the column name)
+        const parts = col.references.split('.');
+        const targetTable = parts.length >= 3
+          ? `${parts[0]}.${parts[1]}`   // "Schema.TableName"
+          : parts[0];                    // legacy "tableName"
         if (targetTable !== sourceTable && edges.has(targetTable)) {
           edges.get(sourceTable).add(targetTable);
           edges.get(targetTable).add(sourceTable);

@@ -219,18 +219,19 @@ async function extractEnumMetadata(pool) {
   console.log('[SCHEMA] Extracting enum metadata (type-aware)...');
   const query = `
     SELECT 
-      ps.tablename, ps.attname AS column_name,
+      ps.schemaname || '.' || ps.tablename AS full_table_name,
+      ps.attname AS column_name,
       ps.n_distinct::int AS distinct_count,
       ps.most_common_vals::text AS common_values,
       cols.data_type
     FROM pg_stats ps
     JOIN information_schema.columns cols
-      ON cols.table_schema = 'public'
+      ON cols.table_schema = ps.schemaname
       AND cols.table_name = ps.tablename
       AND cols.column_name = ps.attname
-    WHERE ps.schemaname = 'public'
+    WHERE ps.schemaname NOT IN ('information_schema', 'pg_catalog', 'topology')
       AND ps.n_distinct > 0 AND ps.n_distinct <= 20 AND ps.n_distinct != -1
-    ORDER BY ps.tablename, ps.attname;
+    ORDER BY full_table_name, ps.attname;
   `;
   try {
     const result = await pool.query(query);
@@ -238,10 +239,10 @@ async function extractEnumMetadata(pool) {
     let skipped = 0;
     for (const row of result.rows) {
       if (isEnumExcluded(row.column_name, row.data_type)) { skipped++; continue; }
-      if (!enumsByTable[row.tablename]) enumsByTable[row.tablename] = {};
+      if (!enumsByTable[row.full_table_name]) enumsByTable[row.full_table_name] = {};
       const values = parsePostgresArray(row.common_values);
       if (values.length > 0) {
-        enumsByTable[row.tablename][row.column_name] = values;
+        enumsByTable[row.full_table_name][row.column_name] = values;
       }
     }
     const count = Object.values(enumsByTable).reduce((s, c) => s + Object.keys(c).length, 0);
@@ -282,14 +283,15 @@ async function profileColumns(pool, schemas) {
   console.log('[SCHEMA] Profiling column statistics...');
 
   // 1. Row counts (instant from pg_class — no table scan)
-  const tables = schemas.map(s => s.table);
   const rowCounts = {};
   try {
     const res = await pool.query(`
-      SELECT relname AS table_name, GREATEST(reltuples::bigint, 0) AS row_count
-      FROM pg_class WHERE relname = ANY($1) AND relkind = 'r';
-    `, [tables]);
-    for (const r of res.rows) rowCounts[r.table_name] = parseInt(r.row_count, 10) || 0;
+      SELECT n.nspname || '.' || c.relname AS full_table_name, GREATEST(c.reltuples::bigint, 0) AS row_count
+      FROM pg_class c
+      JOIN pg_namespace n ON n.oid = c.relnamespace
+      WHERE c.relkind = 'r' AND n.nspname NOT IN ('information_schema', 'pg_catalog', 'topology');
+    `);
+    for (const r of res.rows) rowCounts[r.full_table_name] = parseInt(r.row_count, 10) || 0;
   } catch (e) { console.warn('[SCHEMA] Row count failed:', e.message); }
 
   // 2. Build per-column profiling queries
@@ -310,15 +312,20 @@ async function profileColumns(pool, schemas) {
   for (let i = 0; i < profileTasks.length; i += BATCH_SIZE) {
     const batch = profileTasks.slice(i, i + BATCH_SIZE);
     const promises = batch.map(async ({ table, column, type }) => {
+      // table is "Schema.TableName" — split for proper SQL quoting
+      const parts = table.split('.');
+      const safeTable = parts.length === 2
+        ? `"${parts[0]}"."${parts[1]}"`
+        : `"${table}"`;
       try {
         if (type === 'timestamp') {
           const res = await pool.query(
-            `SELECT MIN("${column}")::text AS min_val, MAX("${column}")::text AS max_val FROM "${table}"`
+            `SELECT MIN("${column}")::text AS min_val, MAX("${column}")::text AS max_val FROM ${safeTable}`
           );
           return { table, column, type, min: res.rows[0]?.min_val, max: res.rows[0]?.max_val };
         } else {
           const res = await pool.query(
-            `SELECT MIN("${column}")::numeric::text AS min_val, MAX("${column}")::numeric::text AS max_val, AVG("${column}")::numeric(15,2)::text AS avg_val FROM "${table}"`
+            `SELECT MIN("${column}")::numeric::text AS min_val, MAX("${column}")::numeric::text AS max_val, AVG("${column}")::numeric(15,2)::text AS avg_val FROM ${safeTable}`
           );
           return {
             table, column, type,
@@ -394,10 +401,13 @@ export async function getAllTables(sessionId) {
   const pool = getPool(sessionId);
   if (!pool) throw new Error('No database connection for this session');
   const result = await pool.query(`
-    SELECT table_name FROM information_schema.tables 
-    WHERE table_schema = 'public' AND table_type = 'BASE TABLE' ORDER BY table_name;
+    SELECT table_schema, table_name FROM information_schema.tables 
+    WHERE table_schema NOT IN ('information_schema', 'pg_catalog', 'topology')
+      AND table_type = 'BASE TABLE'
+    ORDER BY table_schema, table_name;
   `);
-  return result.rows.map(r => r.table_name);
+  // Return fully qualified 'Schema.TableName' strings
+  return result.rows.map(r => `${r.table_schema}.${r.table_name}`);
 }
 
 /**
@@ -454,27 +464,36 @@ export async function getFullSchema(sessionId, onProgress = null) {
   // Parallel fetch: columns, FKs, PKs, enums
   const [columnsResult, fksResult, pksResult, enumMetadata] = await Promise.all([
     pool.query(`
-      SELECT table_name, column_name, data_type, is_nullable, column_default, character_maximum_length
+      SELECT table_schema || '.' || table_name AS full_table_name,
+             column_name, data_type, is_nullable, column_default, character_maximum_length
       FROM information_schema.columns 
-      WHERE table_schema = 'public' AND table_name = ANY($1)
-      ORDER BY table_name, ordinal_position;
+      WHERE table_schema NOT IN ('information_schema', 'pg_catalog', 'topology')
+        AND table_schema || '.' || table_name = ANY($1)
+      ORDER BY full_table_name, ordinal_position;
     `, [tables]),
     pool.query(`
-      SELECT tc.table_name, kcu.column_name,
-             ccu.table_name AS foreign_table, ccu.column_name AS foreign_column
+      SELECT tc.table_schema || '.' || tc.table_name AS full_table_name,
+             kcu.column_name,
+             ccu.table_schema || '.' || ccu.table_name AS foreign_table,
+             ccu.column_name AS foreign_column
       FROM information_schema.table_constraints tc
       JOIN information_schema.key_column_usage kcu
         ON tc.constraint_name = kcu.constraint_name AND tc.table_schema = kcu.table_schema
       JOIN information_schema.constraint_column_usage ccu
         ON ccu.constraint_name = tc.constraint_name AND ccu.table_schema = tc.table_schema
-      WHERE tc.constraint_type = 'FOREIGN KEY' AND tc.table_schema = 'public' AND tc.table_name = ANY($1);
+      WHERE tc.constraint_type = 'FOREIGN KEY'
+        AND tc.table_schema NOT IN ('information_schema', 'pg_catalog', 'topology')
+        AND tc.table_schema || '.' || tc.table_name = ANY($1);
     `, [tables]),
     pool.query(`
-      SELECT tc.table_name, kcu.column_name
+      SELECT tc.table_schema || '.' || tc.table_name AS full_table_name,
+             kcu.column_name
       FROM information_schema.table_constraints tc
       JOIN information_schema.key_column_usage kcu
         ON tc.constraint_name = kcu.constraint_name AND tc.table_schema = kcu.table_schema
-      WHERE tc.constraint_type = 'PRIMARY KEY' AND tc.table_schema = 'public' AND tc.table_name = ANY($1);
+      WHERE tc.constraint_type = 'PRIMARY KEY'
+        AND tc.table_schema NOT IN ('information_schema', 'pg_catalog', 'topology')
+        AND tc.table_schema || '.' || tc.table_name = ANY($1);
     `, [tables]),
     extractEnumMetadata(pool),
   ]);
@@ -485,19 +504,74 @@ export async function getFullSchema(sessionId, onProgress = null) {
   const fkCountByTable = {};
   const relationships = {};
 
-  pksResult.rows.forEach(r => pkSet.add(`${r.table_name}.${r.column_name}`));
+  pksResult.rows.forEach(r => pkSet.add(`${r.full_table_name}.${r.column_name}`));
   fksResult.rows.forEach(r => {
-    const key = `${r.table_name}.${r.column_name}`;
+    const key = `${r.full_table_name}.${r.column_name}`;
     fkMap.set(key, `${r.foreign_table}.${r.foreign_column}`);
-    fkCountByTable[r.table_name] = (fkCountByTable[r.table_name] || 0) + 1;
-    if (!relationships[r.table_name]) relationships[r.table_name] = [];
-    relationships[r.table_name].push({
+    fkCountByTable[r.full_table_name] = (fkCountByTable[r.full_table_name] || 0) + 1;
+    if (!relationships[r.full_table_name]) relationships[r.full_table_name] = [];
+    relationships[r.full_table_name].push({
       column: r.column_name,
       references_table: r.foreign_table,
       references_column: r.foreign_column,
-      cardinality: 'many_to_one', // FK source → FK target is always many:1
+      cardinality: 'many_to_one',
     });
   });
+
+  // ── Heuristic FK inference (for DBs with no formal FK constraints) ──────────
+  // AdventureWorks PostgreSQL migrations often drop all FK constraints.
+  // We infer relationships by matching "FooID" columns to a table named "Foo"
+  // or "Schema.Foo" in the same or related schema.
+  if (fksResult.rows.length === 0) {
+    console.log('[SCHEMA] No formal FK constraints found — inferring relationships from column naming...');
+    
+    // Build a lookup: tableSuffix (lowercase) → FQTN
+    // e.g. "customer" → "Sales.Customer", "product" → "Production.Product"
+    const tableNameIndex = new Map(); // lowercase tableName → FQTN
+    for (const fqtn of tables) {
+      const tablePart = fqtn.split('.')[1] || fqtn;
+      tableNameIndex.set(tablePart.toLowerCase(), fqtn);
+    }
+
+    for (const fqtn of tables) {
+      const cols = columnsResult.rows.filter(r => r.full_table_name === fqtn);
+      for (const col of cols) {
+        const colName = col.column_name;
+        // Match pattern: ends with 'ID' and is not the table's own PK
+        if (!colName.endsWith('ID') && !colName.endsWith('Id')) continue;
+        
+        const prefix = colName.replace(/ID$|Id$/, '');
+        const tableNameOnly = fqtn.split('.')[1] || '';
+        
+        // Don't self-reference (e.g. CustomerID in Sales.Customer)
+        if (prefix.toLowerCase() === tableNameOnly.toLowerCase()) continue;
+        
+        const targetFQTN = tableNameIndex.get(prefix.toLowerCase());
+        if (targetFQTN && targetFQTN !== fqtn) {
+          // Infer that the `ID` column in targetFQTN is the PK
+          const targetPKCol = `${prefix}ID`;
+          const refStr = `${targetFQTN}.${targetPKCol}`;
+          const mapKey = `${fqtn}.${colName}`;
+          
+          if (!fkMap.has(mapKey)) {
+            fkMap.set(mapKey, refStr);
+            fkCountByTable[fqtn] = (fkCountByTable[fqtn] || 0) + 1;
+            if (!relationships[fqtn]) relationships[fqtn] = [];
+            relationships[fqtn].push({
+              column: colName,
+              references_table: targetFQTN,
+              references_column: targetPKCol,
+              cardinality: 'many_to_one',
+              inferred: true,  // mark as heuristic, not from DB constraints
+            });
+          }
+        }
+      }
+    }
+    
+    const inferredCount = Object.values(relationships).reduce((s, arr) => s + arr.length, 0);
+    console.log(`[SCHEMA] Inferred ${inferredCount} relationships from column naming conventions`);
+  }
 
   // Build canonical schema map
   const schemaMap = {};
@@ -515,9 +589,9 @@ export async function getFullSchema(sessionId, onProgress = null) {
 
   // Classify and build columns
   columnsResult.rows.forEach(r => {
-    if (!schemaMap[r.table_name]) return;
+    if (!schemaMap[r.full_table_name]) return;
     
-    const qualifiedKey = `${r.table_name}.${r.column_name}`;
+    const qualifiedKey = `${r.full_table_name}.${r.column_name}`;
     const isPK = pkSet.has(qualifiedKey);
     const isFK = fkMap.has(qualifiedKey);
     const fkTarget = fkMap.get(qualifiedKey) || null;
@@ -542,12 +616,12 @@ export async function getFullSchema(sessionId, onProgress = null) {
     if (classification.aggregation) column.aggregation = classification.aggregation;
 
     // Attach enum values (only for qualified dimension columns)
-    const tableEnums = enumMetadata[r.table_name];
+    const tableEnums = enumMetadata[r.full_table_name];
     if (tableEnums && tableEnums[r.column_name]) {
       column.enum_values = tableEnums[r.column_name];
     }
 
-    schemaMap[r.table_name].columns.push(column);
+    schemaMap[r.full_table_name].columns.push(column);
   });
 
   // Convert to array for profiling

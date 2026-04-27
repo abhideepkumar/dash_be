@@ -40,10 +40,11 @@ Rules:
    RIGHT: SELECT region, SUM(sales_amount) AS total_sales FROM...
 7. **CRITICAL — AGGREGATION**: For columns marked [measure] → use the suggested aggregation function shown (SUM, AVG, etc). Always give a meaningful alias (AS total_sales, AS avg_discount).
 8. **CRITICAL — TIME**: Look for ⚠️ HISTORICAL DATA warnings. If present:
-   Use: WHERE date_col >= (SELECT MAX(date_col) - INTERVAL 'N days' FROM table)
+   Use: WHERE date_col >= (SELECT MAX(date_col) - INTERVAL 'N days' FROM "Schema"."TableName")
    NOT: WHERE date_col >= CURRENT_DATE - INTERVAL 'N days'
-9. For columns with (PK) and (FK →) annotations, use them for JOIN ON clauses
-10. Return ONLY the SQL query — no explanation, no markdown
+9. **CRITICAL — IDENTIFIERS**: PostgreSQL folds unquoted identifiers to lowercase. If a schema or table contains uppercase letters (e.g. Schema.TableName), you MUST wrap the schema and the table separately in double quotes (e.g. FROM "Schema"."TableName"). Do NOT use unquoted mixed-case names.
+10. For columns with (PK) and (FK →) annotations, use them for JOIN ON clauses
+11. Return ONLY the SQL query — no explanation, no markdown
 
 SQL:`;
 }
