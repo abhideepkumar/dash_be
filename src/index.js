@@ -6,6 +6,7 @@ import cors from 'cors';
 import { connectMongoDB } from './config/mongodb.js';
 import schemaRoutes from './routes/schema.routes.js';
 import queryRoutes from './routes/query.routes.js';
+import dashboardRoutes from './routes/dashboard.routes.js';
 import authRoutes from './routes/auth.routes.js';
 import userRoutes from './routes/user.routes.js';
 import logsRoutes from './routes/logs.routes.js';
@@ -35,6 +36,7 @@ app.use('/api/auth', authRoutes);
 app.use('/api/user', userRoutes);
 app.use('/api/schema', schemaRoutes);
 app.use('/api/query', queryRoutes);
+app.use('/api/dashboard', dashboardRoutes);
 app.use('/api/logs', logsRoutes);
 
 // Error handling middleware
