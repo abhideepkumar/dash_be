@@ -1,5 +1,6 @@
 import { callLLM } from '../utils/llmClient.js';
 import { serializeForAnswerability } from './schemaExtractor.js';
+import { getMetadataEnrichmentPrompt } from '../prompts/metadataPrompts.js';
 
 /**
  * Enrich canonical schemas with LLM-generated descriptions and meanings.
@@ -27,28 +28,7 @@ export async function generateAllMetadata(schemas, onProgress = null) {
     return serializeForAnswerability(schema);
   }).join('\n\n---\n');
 
-  const prompt = `You are a database documentation expert. Given the following database schema with ${schemas.length} tables, generate semantic descriptions.
-
-${tablesDescription}
-
-Generate a JSON array with one object per table. Each object must have:
-{
-  "table": "table_name",
-  "description": "1-2 sentence business purpose of this table",
-  "columns": [
-    {"name": "column_name", "meaning": "what this column means in business terms"}
-  ],
-  "common_queries": ["3-5 example natural language questions this table helps answer"]
-}
-
-IMPORTANT: 
-- Return ONLY valid JSON array with exactly ${schemas.length} objects
-- No markdown, no explanation
-- Include ALL ${schemas.length} tables
-- For measure columns, describe what metric they represent
-- For dimension columns, describe what entity or category they label
-- For timestamp columns, describe what business event they mark
-- common_queries should be realistic questions a business analyst would ask`;
+  const prompt = getMetadataEnrichmentPrompt({ schemas, tablesDescription });
 
   try {
     console.log(`[METADATA] Sending ${schemas.length} tables to LLM for enrichment...`);

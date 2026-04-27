@@ -3,6 +3,7 @@ import { fileURLToPath } from 'url';
 import { dirname, join } from 'path';
 import { generateInsights } from './insightGenerator.js';
 import { callLLM } from '../utils/llmClient.js';
+import { getUISpecPrompt } from '../prompts/uiPrompts.js';
 
 // Get current directory for loading component metadata
 const __filename = fileURLToPath(import.meta.url);
@@ -176,100 +177,6 @@ function analyzeDataShape(rows, fields) {
 }
 
 /**
- * Try to select a UI component deterministically based on unambiguous data patterns.
- * Returns null if the pattern is ambiguous and should fall through to LLM.
- * 
- * This saves ~4-5 seconds and ~4k tokens per query for simple shapes.
- */
-function tryDeterministicUISelection(dataAnalysis, rows, fields, originalQuery) {
-  const { dataPatterns, rowCount, categoryColumns, numericColumns, timeColumn } = dataAnalysis;
-
-  // Pattern 1: Single value → Card
-  if (dataPatterns.includes('single_value') && rowCount === 1) {
-    const firstRow = rows[0];
-    const numField = fields.find(f => !isNaN(Number(firstRow[f.name])) && firstRow[f.name] !== null);
-    const textField = fields.find(f => isNaN(Number(firstRow[f.name])));
-    
-    const value = numField ? firstRow[numField.name] : (textField ? firstRow[textField.name] : Object.values(firstRow)[0]);
-    const label = textField ? firstRow[textField.name] : (numField ? numField.name.replace(/_/g, ' ') : 'Result');
-    
-    return {
-      title: originalQuery,
-      description: `Answer to: ${originalQuery}`,
-      component: {
-        type: 'Card',
-        props: {
-          title: typeof label === 'string' ? label : String(label),
-          value: value,
-          description: numField ? numField.name.replace(/_/g, ' ') : null,
-        }
-      }
-    };
-  }
-
-  // Pattern 2: Single row, multiple numeric columns → StatGrid
-  if (dataPatterns.includes('single_row_multi_column') && rowCount === 1) {
-    const firstRow = rows[0];
-    const metrics = fields
-      .filter(f => !isNaN(Number(firstRow[f.name])) && firstRow[f.name] !== null)
-      .map(f => ({
-        title: f.name.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase()),
-        value: firstRow[f.name],
-        description: null,
-        trend: null,
-      }));
-    
-    if (metrics.length >= 2) {
-      return {
-        title: originalQuery,
-        description: `Summary metrics for: ${originalQuery}`,
-        component: {
-          type: 'StatGrid',
-          props: { metrics }
-        }
-      };
-    }
-  }
-
-  // Pattern 3: Category + single metric, few items → BarChart
-  if (dataPatterns.includes('category_comparison') && dataPatterns.includes('few_categories')
-      && categoryColumns.length === 1 && numericColumns.length >= 1 && rowCount > 1) {
-    return {
-      title: originalQuery,
-      description: `Comparison by ${categoryColumns[0].name.replace(/_/g, ' ')}`,
-      component: {
-        type: 'BarChart',
-        props: {
-          categoryKey: categoryColumns[0].name,
-          dataKey: numericColumns[0].name,
-          data: rows,
-        }
-      }
-    };
-  }
-
-  // Pattern 4: Time series + single metric → LineChart
-  if (dataPatterns.includes('time_series') && !dataPatterns.includes('low_cardinality_series')
-      && numericColumns.length >= 1 && timeColumn && rowCount > 1) {
-    return {
-      title: originalQuery,
-      description: `Trend over ${timeColumn.name.replace(/_/g, ' ')}`,
-      component: {
-        type: 'LineChart',
-        props: {
-          xKey: timeColumn.name,
-          yKey: numericColumns[0].name,
-          data: rows,
-        }
-      }
-    };
-  }
-
-  // No clear deterministic match → fall through to LLM
-  return null;
-}
-
-/**
  * Analyze query result data and generate a UI specification with insights
  * @param {object} params - Parameters for UI generation
  * @param {string} params.originalQuery - The original natural language query
@@ -282,37 +189,13 @@ export async function generateUISpec({ originalQuery, sql, rows, fields }) {
   // Analyze data shape first
   const dataAnalysis = analyzeDataShape(rows, fields);
   console.log('[UI GENERATOR] Data analysis:', JSON.stringify(dataAnalysis, null, 2));
-
-  // --- FAST PATH: Deterministic UI selection for unambiguous shapes ---
-  // This avoids the LLM call (~4-5s and ~4k tokens) for clear patterns.
-  const deterministicSpec = tryDeterministicUISelection(dataAnalysis, rows, fields, originalQuery);
-  
-  if (deterministicSpec) {
-    console.log(`[UI GENERATOR] Deterministic selection: ${deterministicSpec.component.type} (skipped LLM)`);
-    
-    // Still generate insights in parallel (they add value)
-    try {
-      const insightsResponse = await generateInsights({ originalQuery, rows, fields, chartType: deterministicSpec.component.type });
-      deterministicSpec.insights = insightsResponse.data || [];
-      if (insightsResponse.metrics) {
-        deterministicSpec.metrics = insightsResponse.metrics;
-      }
-    } catch (err) {
-      console.warn('[UI GENERATOR] Insight generation failed for deterministic path:', err.message);
-      deterministicSpec.insights = [];
-    }
-    
-    return deterministicSpec;
-  }
-
-  // --- SLOW PATH: LLM-based UI selection for ambiguous shapes ---
   
   // Prepare data summary for the LLM
   const rowCount = rows.length;
   const columnInfo = fields.map(f => f.name).join(', ');
   
-  // Sample data (first 4 rows) to help LLM understand the data shape
-  const sampleData = rows.slice(0, 4);
+  // Sample data (first 5 rows) to help LLM understand the data shape
+  const sampleData = rows.slice(0, 5);
   
   // --- DYNAMICALLY GENERATED from component_metadata.json ---
 
@@ -348,67 +231,17 @@ Expected props: ${JSON.stringify(c.expects, null, 2)}`;
 - Analysis notes: ${dataAnalysis.analysisNotes}
 `;
 
-  const prompt = `You are a UI component selector. Your task is to analyze SQL query results and choose the BEST single UI component to display the data.
-
-## User's Original Question
-"${originalQuery}"
-
-## SQL Query Executed
-${sql}
-
-## Query Results Summary
-- Row count: ${rowCount}
-- Columns: ${columnInfo}
-- Sample data (first ${Math.min(4, rowCount)} rows):
-${JSON.stringify(sampleData, null, 2)}
-${analysisSection}
-
-## Available UI Components
-${componentDescriptions}
-
-## How to Choose
-1. Look at the **Data patterns** above
-2. Match them against each component's **"Use when"** criteria
-3. Prefer components with lower **priority** numbers when multiple match
-4. **Pattern → Component guidance:**
-   - \`single_row_multi_column\` → **StatGrid** (multiple KPI tiles from one summary row)
-   - \`single_value\` → **Card** (single KPI)
-   - \`two_numeric_columns\` → **ScatterChart** (correlation between two numeric vars)
-   - \`dual_numeric_time\` → **ComboChart** (two metrics on dual axes over time/category)
-   - \`ordered_stages\` → **FunnelChart** (pipeline/conversion stages)
-   - \`many_categories\` → **TreeMap** (proportional area for many categories)
-   - \`few_categories\` + part-to-whole question → **PieChart**
-   - \`high_cardinality_series\` or \`two_dimensions\` → **Heatmap**
-   - \`low_cardinality_series\` + time → **LineChart** with seriesKey
-   - \`low_cardinality_series\` + category → **BarChart** with seriesKey
-   - \`time_series\` (single series) → **LineChart** or **AreaChart**
-   - \`category_comparison\` (single series) → **BarChart**
-   - \`percentage_range\` → **RadialChart** or **GaugeChart** (if question mentions target)
-5. For percentage/completion **against a target**: Use **GaugeChart**
-6. P&L, variance, bridge analysis: Use **WaterfallChart**
-7. For status labels: Consider **Badge**
-8. **Table is the LAST resort** — only when data is too heterogeneous for any chart
-
-## Props Format Examples (use these as reference for the correct prop shape)
-${propsFormatSection}
-
-## Rules
-1. DO NOT include "data" in props - it will be injected automatically
-2. Use exact column names from the sample data
-3. Output ONLY valid JSON, no explanation, no markdown code blocks
-4. For multi-series BarChart/LineChart/AreaChart, include "seriesKey" prop
-
-## Required Output Format (JSON only)
-{
-  "title": "A descriptive title for this visualization",
-  "description": "Brief explanation of what the data shows",
-  "component": {
-    "type": ${validTypeEnum},
-    "props": { ... }
-  }
-}
-
-JSON Output:`;
+  const prompt = getUISpecPrompt({
+    originalQuery,
+    sql,
+    rowCount,
+    columnInfo,
+    sampleData,
+    analysisSection,
+    componentDescriptions,
+    validTypeEnum,
+    propsFormatSection
+  });
 
   try {
     // Generate UI spec and insights in parallel for better performance
